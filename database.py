@@ -611,7 +611,7 @@ def admin_add_sapy(user_id, amount):
 def admin_set_vip_days(user_id, days):
     ensure_premium_user(user_id)
     now = int(time.time())
-    current = vip_until_value(user_id)
+    current = get_vip_until(user_id)
     base = max(now, current)
     until = base + int(days) * 86400
     cursor.execute("UPDATE premium_wallet SET vip_until = ? WHERE user_id = ?", (until, user_id))
