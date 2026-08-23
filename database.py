@@ -444,3 +444,102 @@ def clear_plot(chat_id, user_id, plot_number):
     DELETE FROM farms WHERE chat_id = ? AND user_id = ? AND plot_number = ?
     """, (chat_id, user_id, plot_number))
     conn.commit()
+
+# --- МАГАЗИН SAPRONEM ---
+def init_shop_db():
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS shop_items (
+        item_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        price INTEGER NOT NULL,
+        item_type TEXT NOT NULL
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_inventory (
+        user_id INTEGER,
+        item_id TEXT,
+        quantity INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, item_id)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_cosmetics (
+        user_id INTEGER PRIMARY KEY,
+        title TEXT
+    )
+    """)
+    items = [
+        ("title_star", "🌟 Титул «Звезда»", "Показывается в профиле.", 50, "title"),
+        ("title_farmer", "🌾 Титул «Фермер»", "Показывается в профиле.", 75, "title"),
+        ("vip_30", "👑 VIP на 30 дней", "+1 грядка, увеличенный ежедневный бонус и VIP-статус.", 100, "vip"),
+        ("vip_90", "👑 VIP на 90 дней", "VIP сразу на 3 месяца.", 250, "vip"),
+        ("gift_pack", "🎁 Подарочный набор", "Одноразовый набор: можно подарить другу 25 💎.", 30, "gift"),
+    ]
+    cursor.executemany("""
+    INSERT OR IGNORE INTO shop_items(item_id, name, description, price, item_type)
+    VALUES (?, ?, ?, ?, ?)
+    """, items)
+    conn.commit()
+
+
+def get_shop_items():
+    cursor.execute("SELECT item_id, name, description, price, item_type FROM shop_items ORDER BY price")
+    return cursor.fetchall()
+
+
+def buy_shop_item(user_id, item_id):
+    ensure_premium_user(user_id)
+    cursor.execute("SELECT name, description, price, item_type FROM shop_items WHERE item_id = ?", (item_id,))
+    item = cursor.fetchone()
+    if not item:
+        return False, "Товар не найден", get_sapy(user_id)
+    name, description, price, item_type = item
+    if not spend_sapy(user_id, price):
+        return False, f"Не хватает сапов. Нужно {price} 💎, у тебя {get_sapy(user_id)} 💎.", get_sapy(user_id)
+
+    if item_type == "vip":
+        days = 90 if item_id == "vip_90" else 30
+        activate_vip(user_id, days)
+    elif item_type == "title":
+        title = "🌟 Звезда" if item_id == "title_star" else "🌾 Фермер"
+        cursor.execute("""
+        INSERT INTO user_cosmetics(user_id, title) VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET title = excluded.title
+        """, (user_id, title))
+        conn.commit()
+    else:
+        cursor.execute("""
+        INSERT INTO user_inventory(user_id, item_id, quantity) VALUES (?, ?, 1)
+        ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + 1
+        """, (user_id, item_id))
+        conn.commit()
+    return True, name, get_sapy(user_id)
+
+
+def get_user_title(user_id):
+    cursor.execute("SELECT title FROM user_cosmetics WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_inventory_quantity(user_id, item_id):
+    cursor.execute("SELECT quantity FROM user_inventory WHERE user_id = ? AND item_id = ?", (user_id, item_id))
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+
+def use_gift_pack(user_id, target_id):
+    if target_id == user_id:
+        return False, "Нельзя подарить набор самому себе."
+    if get_inventory_quantity(user_id, "gift_pack") < 1:
+        return False, "У тебя нет подарочного набора."
+    cursor.execute("UPDATE user_inventory SET quantity = quantity - 1 WHERE user_id = ? AND item_id = ? AND quantity > 0", (user_id, "gift_pack"))
+    add_sapy(target_id, 25)
+    conn.commit()
+    return True, "🎁 Друг получил 25 💎 сапов!"
+
+
+# Инициализируем магазин после создания базовых таблиц.
+init_shop_db()

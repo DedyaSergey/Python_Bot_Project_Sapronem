@@ -39,7 +39,8 @@ def private_menu(profile_exists=False):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=profile_button, callback_data=profile_callback),
          InlineKeyboardButton(text="🎮 Как играть", callback_data="menu_help")],
-        [InlineKeyboardButton(text="💎 Sapronem VIP", callback_data="menu_vip")],
+        [InlineKeyboardButton(text="💎 Магазин Sapronem", callback_data="menu_shop")],
+        [InlineKeyboardButton(text="👑 Sapronem VIP", callback_data="menu_vip")],
         [InlineKeyboardButton(text="🎁 Пригласить друзей", callback_data="menu_ref")],
         [InlineKeyboardButton(text="➕ Добавить в группу", url="https://t.me/Sapronem_Bot?startgroup=true")],
     ])
@@ -114,8 +115,11 @@ async def menu_profile(callback: types.CallbackQuery):
     else:
         name, age, city, bio, photo_id = profile
         vip_badge = " 👑 VIP" if database.is_vip(callback.from_user.id) else ""
+        title = database.get_user_title(callback.from_user.id)
+        title_line = f"🏷️ {title}\n" if title else ""
         caption = (
             f"👤 <b>{name}</b>{vip_badge}\n"
+            f"{title_line}"
             f"🎂 Возраст: {age}\n"
             f"🌆 Город: {city}\n"
             f"📝 {bio}"
@@ -140,6 +144,18 @@ async def menu_help(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+
+@dp.callback_query(F.data == "menu_shop")
+async def menu_shop(callback: types.CallbackQuery):
+    database.ensure_premium_user(callback.from_user.id)
+    items = database.get_shop_items()
+    lines = ["🛍️ <b>Магазин Sapronem</b>", f"\nТвой баланс: <b>{database.get_sapy(callback.from_user.id)} 💎</b>\n"]
+    for item_id, name, description, price, item_type in items:
+        lines.append(f"<b>{name}</b> — {price} 💎\n{description}")
+    lines.append("\nПокупка: <code>купить ID</code>, например <code>купить title_star</code>.")
+    lines.append("🎁 Подарочный набор можно использовать ответом на сообщение друга командой <code>подарить набор</code>.")
+    await callback.message.answer("\n\n".join(lines))
+    await callback.answer()
 
 @dp.callback_query(F.data == "menu_vip")
 async def menu_vip(callback: types.CallbackQuery):
@@ -226,6 +242,7 @@ async def group_help_callback(callback: types.CallbackQuery):
         "💍 <code>брак</code> — предложить брак ответом на сообщение\n"
         "🎭 RP-команды — ответом на сообщение.\n"
         "💎 <code>сапы</code> — глобальная валюта Sapronem\n"
+        "🛍️ <code>магазин</code> — магазин за 💎 сапы\n"
         "👑 <code>вип</code> — преимущества VIP"
     )
     await callback.answer()
@@ -546,6 +563,38 @@ async def handle_messages(message: types.Message):
             "✨ VIP-статус в профиле\n\n"
             "Спасибо, что развиваешь Sapronem 💎"
         )
+        return
+
+    # 12.5. МАГАЗИН И ПРЕМИАЛЬНЫЕ ПРЕДМЕТЫ
+    if text in ["магазин", "шоп", "shop"]:
+        items = database.get_shop_items()
+        lines = ["🛍️ <b>Магазин Sapronem</b>", f"\nБаланс: <b>{database.get_sapy(user_id)} 💎</b>\n"]
+        for item_id, name, description, price, item_type in items:
+            lines.append(f"<b>{name}</b> — {price} 💎\n{description}\nID: <code>{item_id}</code>")
+        lines.append("\nКупить: <code>купить ID</code>")
+        await message.answer("\n\n".join(lines))
+        return
+
+    if text.startswith("купить "):
+        item_id = text.split(maxsplit=1)[1].strip()
+        ok, result, balance = database.buy_shop_item(user_id, item_id)
+        if not ok:
+            await message.answer(f"❌ {result}")
+            return
+        await message.answer(f"🛍️ <b>Покупка успешна!</b>\n\n{result}\n\nБаланс: <b>{balance} 💎</b>")
+        return
+
+    if text in ["подарить набор", "подарок"]:
+        if not message.reply_to_message:
+            await message.answer("🎁 Ответь этой командой на сообщение друга, которому хочешь подарить набор.")
+            return
+        target_id = message.reply_to_message.from_user.id
+        ok, result = database.use_gift_pack(user_id, target_id)
+        if not ok:
+            await message.answer(f"❌ {result}")
+            return
+        target_name = message.reply_to_message.from_user.full_name
+        await message.answer(f"{result}\n\n🎁 Подарок отправлен: <b>{target_name}</b>")
         return
 
     # 13. ОГРАНИЧЕНИЕ ЛС
