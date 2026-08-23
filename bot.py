@@ -26,6 +26,43 @@ dp = Dispatcher()
 DICE_COOLDOWN = {}
 PROPOSED_MARRIAGES = {}
 
+# ID владельца/админов задаётся в Railway Variables:
+# ADMIN_IDS=123456789,987654321
+def load_admin_ids():
+    raw = os.getenv("ADMIN_IDS", "")
+    result = set()
+    for value in raw.replace(";", ",").split(","):
+        value = value.strip()
+        if value.isdigit():
+            result.add(int(value))
+    return result
+
+ADMIN_IDS = load_admin_ids()
+
+def is_owner(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
+def admin_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
+         InlineKeyboardButton(text="👤 Пользователь", callback_data="admin_user")],
+        [InlineKeyboardButton(text="💎 Выдать сапы", callback_data="admin_add_sapy"),
+         InlineKeyboardButton(text="➖ Забрать сапы", callback_data="admin_remove_sapy")],
+        [InlineKeyboardButton(text="👑 Выдать VIP", callback_data="admin_add_vip"),
+         InlineKeyboardButton(text="❌ Снять VIP", callback_data="admin_remove_vip")],
+        [InlineKeyboardButton(text="💳 Платежи", callback_data="admin_payments"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="🔄 Обновить ID админов", callback_data="admin_reload")],
+    ])
+
+class AdminForm(StatesGroup):
+    USER_ID = State()
+    SAPY_ACTION = State()
+    SAPY_AMOUNT = State()
+    VIP_USER = State()
+    VIP_DAYS = State()
+    BROADCAST = State()
+
 # Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
 STAR_PACKAGES = {
     "50": {"stars": 50, "sapy": 500, "title": "💎 500 сапов"},
@@ -61,6 +98,153 @@ def group_menu():
          InlineKeyboardButton(text="❓ Команды", callback_data="group_help")],
     ])
 
+
+
+@dp.message(Command("admin"), F.chat.type == "private")
+async def admin_command(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await message.answer("❌ Доступ запрещён.")
+        return
+    await state.clear()
+    await message.answer("🔐 <b>Панель владельца Sapronem</b>\n\nВыбери действие:", reply_markup=admin_menu())
+
+@dp.callback_query(F.data == "admin_reload")
+async def admin_reload(callback: types.CallbackQuery):
+    global ADMIN_IDS
+    ADMIN_IDS = load_admin_ids()
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Нет доступа.", show_alert=True)
+        return
+    await callback.answer("✅ Список админов обновлён.", show_alert=True)
+
+@dp.callback_query(F.data.startswith("admin_"))
+async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Нет доступа.", show_alert=True)
+        return
+    action = callback.data
+    await callback.answer()
+    if action == "admin_stats":
+        s = database.admin_stats()
+        await callback.message.answer(
+            "📊 <b>Статистика Sapronem</b>\n\n"
+            f"👤 Пользователи: <b>{s['users']}</b>\n"
+            f"👥 Группы: <b>{s['groups']}</b>\n"
+            f"💎 Сапов в кошельках: <b>{s['sapy']}</b>\n"
+            f"👑 Активных VIP: <b>{s['vip']}</b>\n"
+            f"💳 Платежей Stars: <b>{s['payments']}</b>\n"
+            f"⭐ Получено Stars: <b>{s['stars']}</b>"
+        )
+    elif action == "admin_user":
+        await state.set_state(AdminForm.USER_ID)
+        await callback.message.answer("👤 Введи Telegram ID пользователя:")
+    elif action in ("admin_add_sapy", "admin_remove_sapy"):
+        await state.update_data(sapy_sign=1 if action == "admin_add_sapy" else -1)
+        await state.set_state(AdminForm.SAPY_ACTION)
+        await callback.message.answer("💎 Введи через пробел: <code>ID пользователя количество</code>\nНапример: <code>123456789 500</code>")
+    elif action == "admin_add_vip":
+        await state.set_state(AdminForm.VIP_USER)
+        await state.update_data(vip_action="add")
+        await callback.message.answer("👑 Введи ID пользователя и количество дней:\n<code>123456789 30</code>")
+    elif action == "admin_remove_vip":
+        await state.set_state(AdminForm.VIP_USER)
+        await state.update_data(vip_action="remove")
+        await callback.message.answer("❌ Введи Telegram ID пользователя:")
+    elif action == "admin_payments":
+        rows = database.admin_payment_history()
+        if not rows:
+            await callback.message.answer("💳 Платежей пока нет.")
+            return
+        lines = ["💳 <b>Последние платежи</b>\n"]
+        for uid, stars, sapy, payload, created in rows:
+            dt = time.strftime("%d.%m.%Y %H:%M", time.localtime(created))
+            lines.append(f"👤 <code>{uid}</code> — ⭐ {stars} → 💎 {sapy} — {dt}")
+        await callback.message.answer("\n".join(lines))
+    elif action == "admin_broadcast":
+        await state.set_state(AdminForm.BROADCAST)
+        await callback.message.answer("📢 Отправь текст рассылки одним сообщением.\n\nДля отмены: <code>отмена</code>")
+
+@dp.message(AdminForm.USER_ID, F.chat.type == "private")
+async def admin_find_user(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    if not message.text or not message.text.strip().isdigit():
+        await message.answer("❌ Нужен числовой Telegram ID.")
+        return
+    uid = int(message.text.strip())
+    profile, premium, referrals = database.admin_user(uid)
+    name = profile[0] if profile else "нет профиля"
+    vip_until = premium[1]
+    vip = time.strftime("%d.%m.%Y %H:%M", time.localtime(vip_until)) if vip_until > int(time.time()) else "нет"
+    await state.clear()
+    await message.answer(
+        "👤 <b>Пользователь</b>\n\n"
+        f"ID: <code>{uid}</code>\n"
+        f"Имя: <b>{name}</b>\n"
+        f"💎 Сапы: <b>{premium[0]}</b>\n"
+        f"👑 VIP до: <b>{vip}</b>\n"
+        f"👥 Пригласил: <b>{referrals}</b>"
+    )
+
+@dp.message(AdminForm.SAPY_ACTION, F.chat.type == "private")
+async def admin_sapy_action(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not all(x.isdigit() for x in parts):
+        await message.answer("❌ Формат: <code>ID количество</code>")
+        return
+    uid, amount = map(int, parts)
+    data = await state.get_data()
+    amount *= data.get("sapy_sign", 1)
+    balance = database.admin_add_sapy(uid, amount)
+    await state.clear()
+    await message.answer(f"✅ Баланс <code>{uid}</code> изменён на <b>{amount:+d} 💎</b>.\nТеперь: <b>{balance} 💎</b>")
+
+@dp.message(AdminForm.VIP_USER, F.chat.type == "private")
+async def admin_vip_action(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    data = await state.get_data()
+    parts = (message.text or "").split()
+    if data.get("vip_action") == "remove":
+        if len(parts) != 1 or not parts[0].isdigit():
+            await message.answer("❌ Нужен Telegram ID.")
+            return
+        uid = int(parts[0])
+        database.admin_remove_vip(uid)
+        await state.clear()
+        await message.answer(f"❌ VIP снят с <code>{uid}</code>.")
+        return
+    if len(parts) != 2 or not all(x.isdigit() for x in parts):
+        await message.answer("❌ Формат: <code>ID дни</code>")
+        return
+    uid, days = map(int, parts)
+    until = database.admin_set_vip_days(uid, days)
+    await state.clear()
+    await message.answer(f"👑 VIP выдан пользователю <code>{uid}</code> на <b>{days} дней</b>.\nДо: <b>{time.strftime('%d.%m.%Y %H:%M', time.localtime(until))}</b>")
+
+@dp.message(AdminForm.BROADCAST, F.chat.type == "private")
+async def admin_broadcast(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    if (message.text or "").strip().lower() == "отмена":
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.")
+        return
+    text = message.html_text
+    user_ids = database.admin_all_user_ids()
+    sent = failed = 0
+    await message.answer(f"📢 Начинаю рассылку для <b>{len(user_ids)}</b> пользователей...")
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.04)
+    await state.clear()
+    await message.answer(f"✅ Рассылка завершена.\n\n📨 Отправлено: <b>{sent}</b>\n⚠️ Не доставлено: <b>{failed}</b>", reply_markup=admin_menu())
 
 @dp.pre_checkout_query()
 async def pre_checkout_handler(query: types.PreCheckoutQuery):

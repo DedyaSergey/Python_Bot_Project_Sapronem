@@ -573,3 +573,63 @@ def use_gift_pack(user_id, target_id):
 
 # Инициализируем магазин после создания базовых таблиц.
 init_shop_db()
+
+
+# --- АДМИН-ЦЕНТР SAPRONEM ---
+def admin_stats():
+    stats = {}
+    cursor.execute("SELECT COUNT(*) FROM user_meta")
+    stats["users"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM reputation WHERE chat_id < 0")
+    stats["groups"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM premium_wallet")
+    stats["wallets"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM premium_wallet WHERE vip_until > ?", (int(time.time()),))
+    stats["vip"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(sapy), 0) FROM premium_wallet")
+    stats["sapy"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM star_payments")
+    stats["payments"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(stars), 0) FROM star_payments")
+    stats["stars"] = cursor.fetchone()[0]
+    return stats
+
+def admin_user(user_id):
+    ensure_premium_user(user_id)
+    cursor.execute("SELECT name, age, city, bio FROM profiles WHERE user_id = ?", (user_id,))
+    profile = cursor.fetchone()
+    cursor.execute("SELECT sapy, vip_until FROM premium_wallet WHERE user_id = ?", (user_id,))
+    premium = cursor.fetchone() or (0, 0)
+    cursor.execute("SELECT COUNT(*) FROM user_meta WHERE referred_by = ?", (user_id,))
+    referrals = cursor.fetchone()[0]
+    return profile, premium, referrals
+
+def admin_add_sapy(user_id, amount):
+    ensure_premium_user(user_id)
+    return add_sapy(user_id, amount)
+
+def admin_set_vip_days(user_id, days):
+    ensure_premium_user(user_id)
+    now = int(time.time())
+    current = vip_until_value(user_id)
+    base = max(now, current)
+    until = base + int(days) * 86400
+    cursor.execute("UPDATE premium_wallet SET vip_until = ? WHERE user_id = ?", (until, user_id))
+    conn.commit()
+    return until
+
+def admin_remove_vip(user_id):
+    ensure_premium_user(user_id)
+    cursor.execute("UPDATE premium_wallet SET vip_until = 0 WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+def admin_payment_history(limit=20):
+    cursor.execute("""
+        SELECT user_id, stars, sapy, payload, created_at
+        FROM star_payments ORDER BY created_at DESC LIMIT ?
+    """, (limit,))
+    return cursor.fetchall()
+
+def admin_all_user_ids():
+    cursor.execute("SELECT user_id FROM user_meta")
+    return [row[0] for row in cursor.fetchall()]
