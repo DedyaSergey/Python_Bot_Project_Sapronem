@@ -10,6 +10,8 @@ import os
 import database
 import rp
 import rights
+import farm
+import top
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -103,6 +105,13 @@ async def handle_messages(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
         database.log_message(chat_id, user_id, user_name)
 
+    # ВНИМАНИЕ: ниже независимые блоки "if ... return", а не одна большая
+    # elif-цепочка. Раньше в середине файла был отдельный блок проверки
+    # триггеров, который случайно склеивал все следующие команды в свою
+    # elif-цепочку — из-за этого "топ весь", "варны" и "карма" могли
+    # перестать нормально проверяться. Независимые if-блоки от этой
+    # проблемы не зависят.
+
     # 1. ИНФА
     if text.startswith(("saproem инфа ", "сапр инфа ", "инфа ")):
         percent = random.randint(0, 100)
@@ -110,8 +119,9 @@ async def handle_messages(message: types.Message):
         return
 
     # 2. БРАК
-    elif text == "брак":
-        if message.chat.type in ["private"]: return
+    if text == "брак":
+        if message.chat.type in ["private"]:
+            return
         if not message.reply_to_message:
             await message.reply("Ответь этой командой на сообщение того, с кем хочешь брак! 💍")
             return
@@ -129,7 +139,7 @@ async def handle_messages(message: types.Message):
         return
 
     # 3. СОГЛАСИЕ НА БРАК
-    elif text in ["согласен", "согласна"]:
+    if text in ["согласен", "согласна"]:
         if chat_id in PROPOSED_MARRIAGES and PROPOSED_MARRIAGES[chat_id][2] == user_id:
             u1_id, u1_name, u2_id, u2_name = PROPOSED_MARRIAGES[chat_id]
             database.create_marriage(chat_id, u1_id, u1_name, u2_id, u2_name)
@@ -140,14 +150,14 @@ async def handle_messages(message: types.Message):
             return
 
     # 4. ОТКАЗ ОТ БРАКА
-    elif text == "отказ":
+    if text == "отказ":
         if chat_id in PROPOSED_MARRIAGES and PROPOSED_MARRIAGES[chat_id][2] == user_id:
             del PROPOSED_MARRIAGES[chat_id]
             await message.reply("Разбитое сердце... Предложение брака отклонено. 💔")
             return
 
     # 5. ПРОВЕРКА БРАКА
-    elif text in ["браки", "мой брак"]:
+    if text in ["браки", "мой брак"]:
         pair = database.check_marriage(chat_id, user_id)
         if not pair:
             await message.reply("Ты еще одинок. Напиши <code>брак</code> в ответ кому-то! 📭")
@@ -156,7 +166,7 @@ async def handle_messages(message: types.Message):
         return
 
     # 6. РАЗВОД
-    elif text == "развод":
+    if text == "развод":
         pair = database.check_marriage(chat_id, user_id)
         if not pair:
             await message.reply("Тебе не с кем разводиться!")
@@ -166,7 +176,7 @@ async def handle_messages(message: types.Message):
         return
 
     # 7. СОЗДАТЬ ТРИГГЕР
-    elif text.startswith("создать триггер"):
+    if text.startswith("создать триггер"):
         is_user_admin = await rights.is_admin(bot, chat_id, user_id)
         if not is_user_admin:
             await message.reply("❌ Ошибка!: Создавать или изменять триггеры могут только администраторы группы!")
@@ -182,7 +192,7 @@ async def handle_messages(message: types.Message):
         return
 
     # 8. УДАЛИТЬ ТРИГГЕР
-    elif text.startswith("удалить триггер"):
+    if text.startswith("удалить триггер"):
         is_user_admin = await rights.is_admin(bot, chat_id, user_id)
         if not is_user_admin:
             await message.reply("❌ Отклонено: Вы не являетесь администратором!")
@@ -196,15 +206,8 @@ async def handle_messages(message: types.Message):
         await message.reply(f"🗑 Триггер на слово <b>«{keyword}»</b> удален!")
         return
 
-
-    # Проверка обычных сообщений на наличие триггеров
-    trigger_reply = database.get_trigger(chat_id, text)
-    if trigger_reply:
-        await message.answer(trigger_reply)
-        return
-
-        # 9. КУБЫ / КУБИК
-    elif text in ["кубы", "кубик", "куб"]:
+    # 9. КУБЫ / КУБИК
+    if text in ["кубы", "кубик", "куб"]:
         if message.chat.type in ["private"]:
             await message.answer("🎲 Кубы доступны только в группах!")
             return
@@ -225,20 +228,14 @@ async def handle_messages(message: types.Message):
         return
 
     # 10. ТОП КУБЫ
-    elif text == "топ кубы":
-        if message.chat.type in ["private"]: return
-        top_dice = database.get_top_dice(chat_id)
-        if not top_dice:
-            await message.answer("🎲 В кубы в этом чате еще никто не играл!")
+    if text == "топ кубы":
+        if message.chat.type in ["private"]:
             return
-        reply = "<b>🏆 ТОП ВЕЗУНЧИКОВ ЧАТА ПО КУБАМ:</b>\n\n"
-        for i, (name, total_score) in enumerate(top_dice, 1):
-            reply += f"{i}. <b>{name}</b> — {total_score} очков 🎲\n"
-        await message.answer(reply)
+        await message.answer(top.build_top_dice_text(chat_id))
         return
 
     # 11. АНКЕТА
-    elif text == "анкета":
+    if text == "анкета":
         is_reply = bool(message.reply_to_message)
         target = message.reply_to_message.from_user if is_reply else message.from_user
         profile = database.get_profile(target.id)
@@ -253,24 +250,45 @@ async def handle_messages(message: types.Message):
         return
 
     # 12. ОГРАНИЧЕНИЕ ЛС
-    elif message.chat.type in ["private"]:
+    # Всё, что ниже (топ, ферма, варны, модерация, карма, РП, триггеры) —
+    # только для групп. Этот блок обязательно должен идти отдельным
+    # верхнеуровневым "if" (не elif), иначе он может случайно перехватить
+    # часть команд, написанных в группе.
+    if message.chat.type in ["private"]:
         await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота!")
         return
 
     # 13. ТОП ВСЕХ (СООБЩЕНИЯ)
-    elif text in ["топ весь", "топ вся", "топ соо"]:
-        top = database.get_top_messages(chat_id)
-        if not top:
-            await message.answer("Чат пока пуст! 💬")
-            return
-        reply = "<b>📊 Статистика по общительным пользователям за всё время:</b>\n\n"
-        for i, (name, count) in enumerate(top, 1):
-            reply += f"{i}. <b>{name}</b> — {count} соо\n"
-        await message.answer(reply)
+    if text in ["топ весь", "топ вся", "топ соо", "топ сообщений"]:
+        await message.answer(top.build_top_messages_text(chat_id))
         return
 
-    # 14. ПРОСМОТР ВАРНОВ
-    elif text in ["варны", "мои варны", "предупреждения"]:
+    # 14. ФЕРМА
+    if text == "ферма":
+        await message.answer(farm.build_farm_text(chat_id, user_id))
+        return
+
+    # 15. ПОСАДИТЬ
+    if text.startswith("посадить"):
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply(
+                "Укажи культуру: <code>посадить морковь</code>\n"
+                "Доступно: " + ", ".join(farm.CROPS.keys())
+            )
+            return
+        success, reply_text = farm.plant(chat_id, user_id, parts[1])
+        await message.reply(reply_text)
+        return
+
+    # 16. СОБРАТЬ
+    if text == "собрать":
+        success, reply_text = farm.harvest(chat_id, user_id)
+        await message.reply(reply_text)
+        return
+
+    # 17. ПРОСМОТР ВАРНОВ
+    if text in ["варны", "мои варны", "предупреждения"]:
         is_reply = bool(message.reply_to_message)
         target = message.reply_to_message.from_user if is_reply else message.from_user
         cursor = database.conn.cursor()
@@ -281,7 +299,7 @@ async def handle_messages(message: types.Message):
         await message.answer(f"⚠️ Предупреждения {mention}: <b>{user_warns}/3</b>")
         return
 
-    # 15. БЛОК МОДЕРАЦИИ (БАН, КИК, МУТ)
+    # 18. БЛОК МОДЕРАЦИИ (БАН, КИК, МУТ)
     cmd_prefixes = ("бан", "/ban", "кик", "/kick", "мут", "размут", "разбан", "варн", "пред", "снять варны")
     if text.startswith(cmd_prefixes):
         is_user_admin = await rights.is_admin(bot, chat_id, user_id)
@@ -311,7 +329,7 @@ async def handle_messages(message: types.Message):
                     database.reset_warns(chat_id, target.id)
                     await message.answer(f"🔨 {t_mention} получил 3/3 Предупреждений и был забанен!")
                 else:
-                    await message.answer(f"⚠️ ]Варн {t_mention}! Всего: <b>{current_warns}/3</b>")
+                    await message.answer(f"⚠️ Варн {t_mention}! Всего: <b>{current_warns}/3</b>")
             elif text.startswith("снять варны"):
                 database.reset_warns(chat_id, target.id)
                 await message.answer(f"✅ С пользователя {t_mention} сняты все варны!")
@@ -346,8 +364,8 @@ async def handle_messages(message: types.Message):
             await message.answer(f"❌ Ошибка. Проверьте права админа у бота.")
         return
 
-    # 16. СТАТИСТИКА КАРМЫ
-    elif text in ["+", "плюс", "спасибо", "-", "минус", "карма", "стата"]:
+    # 19. СТАТИСТИКА КАРМЫ
+    if text in ["+", "плюс", "спасибо", "-", "минус", "карма", "стата"]:
         if text in ["карма", "стата"]:
             target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
             val = database.get_karma(chat_id, target.id)
@@ -363,7 +381,7 @@ async def handle_messages(message: types.Message):
         await message.answer(f"📊 Карма пользователя {target.full_name} изменена!\nТекущая карма: <b>{new_val}</b>")
         return
 
-    # 17. РП КОМАНДЫ
+    # 20. РП КОМАНДЫ
     rp_action = rp.check_rp(message.text)
     if rp_action:
         if not message.reply_to_message:
@@ -376,7 +394,8 @@ async def handle_messages(message: types.Message):
         await message.answer(f"{emoji} {f_men} {act} {t_men}")
         return
 
-    # 18. ПРОВЕРКА ОБЫЧНЫХ ТРИГГЕРОВ
+    # 21. ПРОВЕРКА ОБЫЧНЫХ ТРИГГЕРОВ (единственная проверка, в самом конце —
+    # чтобы кастомные триггеры не перекрывали встроенные команды выше)
     trigger_reply = database.get_trigger(chat_id, text)
     if trigger_reply:
         await message.answer(trigger_reply)
@@ -390,5 +409,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
