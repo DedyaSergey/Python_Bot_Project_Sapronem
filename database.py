@@ -107,6 +107,16 @@ def init_db():
     )
     """)
 
+    # Глобальная премиальная валюта Sapronem и VIP.
+    # Она не зависит от конкретной группы, в отличие от обычных 🪙 монет фермы.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS premium_wallet (
+        user_id INTEGER PRIMARY KEY,
+        sapy INTEGER DEFAULT 0,
+        vip_until INTEGER DEFAULT 0
+    )
+    """)
+
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ТРИГГЕРОВ ---
@@ -343,8 +353,67 @@ def get_economy_status(chat_id, user_id):
     return cursor.fetchone() or (0, 0)
 
 
+# --- ГЛОБАЛЬНАЯ ВАЛЮТА И VIP ---
+def ensure_premium_user(user_id):
+    cursor.execute("INSERT OR IGNORE INTO premium_wallet (user_id, sapy, vip_until) VALUES (?, 0, 0)", (user_id,))
+    conn.commit()
+
+
+def get_sapy(user_id):
+    ensure_premium_user(user_id)
+    cursor.execute("SELECT sapy FROM premium_wallet WHERE user_id = ?", (user_id,))
+    return cursor.fetchone()[0]
+
+
+def add_sapy(user_id, amount):
+    ensure_premium_user(user_id)
+    cursor.execute("UPDATE premium_wallet SET sapy = MAX(0, sapy + ?) WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    return get_sapy(user_id)
+
+
+def spend_sapy(user_id, amount):
+    ensure_premium_user(user_id)
+    cursor.execute("UPDATE premium_wallet SET sapy = sapy - ? WHERE user_id = ? AND sapy >= ?", (amount, user_id, amount))
+    changed = cursor.rowcount > 0
+    conn.commit()
+    return changed
+
+
+def get_vip_until(user_id):
+    ensure_premium_user(user_id)
+    cursor.execute("SELECT vip_until FROM premium_wallet WHERE user_id = ?", (user_id,))
+    return cursor.fetchone()[0]
+
+
+def is_vip(user_id):
+    return get_vip_until(user_id) > int(time.time())
+
+
+def activate_vip(user_id, days=30):
+    ensure_premium_user(user_id)
+    now = int(time.time())
+    current = get_vip_until(user_id)
+    start = max(now, current)
+    until = start + days * 86400
+    cursor.execute("UPDATE premium_wallet SET vip_until = ? WHERE user_id = ?", (until, user_id))
+    conn.commit()
+    return until
+
+
+def buy_vip(user_id, price=100, days=30):
+    if not spend_sapy(user_id, price):
+        return False, get_sapy(user_id), get_vip_until(user_id)
+    until = activate_vip(user_id, days)
+    return True, get_sapy(user_id), until
+
+
+def vip_seconds_left(user_id):
+    return max(0, get_vip_until(user_id) - int(time.time()))
+
+
 # --- ФУНКЦИИ ДЛЯ ФЕРМЫ ---
-FARM_PLOTS = 3  # сколько грядок доступно каждому игроку
+FARM_PLOTS = 3  # обычный лимит; VIP получает +1 грядку
 
 def get_farm(chat_id, user_id):
     """Возвращает список из FARM_PLOTS элементов: (plot_number, crop, planted_at) или (plot_number, None, None)"""
@@ -355,7 +424,8 @@ def get_farm(chat_id, user_id):
     existing = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
 
     plots = []
-    for i in range(1, FARM_PLOTS + 1):
+    plot_limit = FARM_PLOTS + (1 if is_vip(user_id) else 0)
+    for i in range(1, plot_limit + 1):
         crop, planted_at = existing.get(i, (None, None))
         plots.append((i, crop, planted_at))
     return plots

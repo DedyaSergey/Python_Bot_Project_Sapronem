@@ -39,6 +39,7 @@ def private_menu(profile_exists=False):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=profile_button, callback_data=profile_callback),
          InlineKeyboardButton(text="🎮 Как играть", callback_data="menu_help")],
+        [InlineKeyboardButton(text="💎 Sapronem VIP", callback_data="menu_vip")],
         [InlineKeyboardButton(text="🎁 Пригласить друзей", callback_data="menu_ref")],
         [InlineKeyboardButton(text="➕ Добавить в группу", url="https://t.me/Sapronem_Bot?startgroup=true")],
     ])
@@ -64,7 +65,14 @@ async def cmd_start_private(message: types.Message, state: FSMContext, command: 
         except ValueError:
             referred_by = None
 
+    existing_referrer = database.get_referral_inviter(message.from_user.id)
     saved_referrer = database.register_user(message.from_user.id, referred_by)
+    if saved_referrer and existing_referrer is None and saved_referrer != message.from_user.id:
+        database.add_sapy(saved_referrer, 10)
+        if database.get_referral_count(saved_referrer) >= 3 and not database.get_referral_reward_claimed(saved_referrer):
+            database.add_sapy(saved_referrer, 50)
+            database.claim_referral_reward(saved_referrer)
+    database.ensure_premium_user(message.from_user.id)
     mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.full_name}</a>'
     profile_exists = database.get_profile(message.from_user.id) is not None
     profile_line = "✅ Профиль уже создан." if profile_exists else "👤 Создай профиль — это займёт пару минут."
@@ -105,8 +113,9 @@ async def menu_profile(callback: types.CallbackQuery):
         )
     else:
         name, age, city, bio, photo_id = profile
+        vip_badge = " 👑 VIP" if database.is_vip(callback.from_user.id) else ""
         caption = (
-            f"👤 <b>{name}</b>\n"
+            f"👤 <b>{name}</b>{vip_badge}\n"
             f"🎂 Возраст: {age}\n"
             f"🌆 Город: {city}\n"
             f"📝 {bio}"
@@ -132,17 +141,46 @@ async def menu_help(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "menu_vip")
+async def menu_vip(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    database.ensure_premium_user(user_id)
+    sapy = database.get_sapy(user_id)
+    vip_left = database.vip_seconds_left(user_id)
+    if vip_left:
+        days = vip_left // 86400
+        hours = (vip_left % 86400) // 3600
+        status = f"✅ VIP активен ещё <b>{days} дн. {hours} ч.</b>"
+    else:
+        status = "❌ VIP не активен"
+    await callback.message.answer(
+        "💎 <b>Sapronem VIP</b>\n\n"
+        f"Баланс: <b>{sapy} 💎</b>\n"
+        f"{status}\n\n"
+        "Что даёт VIP:\n"
+        "🌱 +1 дополнительная грядка\n"
+        "🎁 +100 🪙 к ежедневному бонусу\n"
+        "✨ VIP-статус в профиле\n\n"
+        "💎 <b>100 сапов = 30 дней VIP</b>\n"
+        "Покупка: <code>купить вип</code>\n"
+        "Баланс: <code>сапы</code>"
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "menu_ref")
-async def menu_ref(callback: types.CallbackQuery):
+async def menu_ref_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     database.register_user(user_id)
+    database.ensure_premium_user(user_id)
     count = database.get_referral_count(user_id)
     link = f"https://t.me/Sapronem_Bot?start=ref_{user_id}"
-    reward_text = "🎁 После 3 приглашённых друзей получишь +500 🪙 в группе, где заберёшь награду."
     await callback.message.answer(
-        f"👥 <b>Приглашай друзей в Sapronem</b>\n\n"
-        f"Твоих приглашений: <b>{count}</b>/3\n\n"
-        f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n{reward_text}"
+        f"👥 <b>Приглашай друзей</b>\n\n"
+        f"Приглашено: <b>{count}</b>\n\n"
+        f"🔗 <code>{link}</code>\n\n"
+        "🎁 За каждого нового пользователя: <b>+10 💎</b>\n"
+        "🔥 За 3 приглашённых: ещё <b>+50 💎</b>."
     )
     await callback.answer()
 
@@ -186,7 +224,9 @@ async def group_help_callback(callback: types.CallbackQuery):
         "👤 <code>анкета</code> — твой профиль (или ответом на сообщение)\n"
         "⭐ <code>карма</code> — репутация\n"
         "💍 <code>брак</code> — предложить брак ответом на сообщение\n"
-        "🎭 RP-команды — ответом на сообщение."
+        "🎭 RP-команды — ответом на сообщение.\n"
+        "💎 <code>сапы</code> — глобальная валюта Sapronem\n"
+        "👑 <code>вип</code> — преимущества VIP"
     )
     await callback.answer()
 
@@ -194,22 +234,19 @@ async def send_daily_bonus(message: types.Message, user: types.User):
     chat_id = message.chat.id
     user_id = user.id
     first = database.ensure_economy_user(chat_id, user_id)
-    claimed, seconds_left = database.claim_daily_bonus(chat_id, user_id, amount=100)
+    daily_amount = 200 if database.is_vip(user.id) else 100
+    claimed, seconds_left = database.claim_daily_bonus(chat_id, user_id, amount=daily_amount)
 
     extra = ""
-    if database.get_referral_count(user_id) >= 3 and not database.get_referral_reward_claimed(user_id):
-        database.add_coins(chat_id, user_id, 500)
-        database.claim_referral_reward(user_id)
-        extra = "\n👥 За 3 приглашённых друзей: <b>+500 🪙</b>"
 
     if first:
         await message.answer("🎉 <b>Стартовый бонус: +100 🪙</b>\n\nТеперь можно открыть <code>ферма</code> и посадить первую культуру!")
         if claimed:
-            await message.answer("🎁 <b>Ежедневный бонус: +100 🪙</b>" + extra)
+            await message.answer(f"🎁 <b>Ежедневный бонус: +{daily_amount} 🪙</b>" + extra)
         return
 
     if claimed:
-        await message.answer("🎁 <b>Ежедневный бонус: +100 🪙</b>" + extra)
+        await message.answer(f"🎁 <b>Ежедневный бонус: +{daily_amount} 🪙</b>" + extra)
         return
 
     hours = seconds_left // 3600
@@ -457,7 +494,61 @@ async def handle_messages(message: types.Message):
             await message.answer(caption + "\n\n📸 <i>Фото не добавлено</i>")
         return
 
-    # 12. ОГРАНИЧЕНИЕ ЛС
+    # 12. SAPRONEM: глобальная валюта и VIP
+    # 💎 Сапы и VIP общие для пользователя во всех группах.
+    if text in ["сапы", "сап", "баланс", "кошелек", "кошелёк"]:
+        database.ensure_premium_user(user_id)
+        sapy = database.get_sapy(user_id)
+        vip_left = database.vip_seconds_left(user_id)
+        vip_status = "👑 VIP активен" if vip_left else "▫️ VIP не активен"
+        await message.answer(
+            f"💎 <b>Баланс Sapronem</b>\n\n"
+            f"Сапы: <b>{sapy} 💎</b>\n"
+            f"{vip_status}\n\n"
+            "Команда VIP: <code>вип</code>"
+        )
+        return
+
+    if text in ["вип", "vip", "магазин", "премиум"]:
+        database.ensure_premium_user(user_id)
+        sapy = database.get_sapy(user_id)
+        vip_left = database.vip_seconds_left(user_id)
+        if vip_left:
+            days = vip_left // 86400
+            hours = (vip_left % 86400) // 3600
+            status = f"✅ активен ещё <b>{days} дн. {hours} ч.</b>"
+        else:
+            status = "❌ не активен"
+        await message.answer(
+            "💎 <b>Sapronem VIP</b>\n\n"
+            f"Твой баланс: <b>{sapy} 💎</b>\n"
+            f"Статус: {status}\n\n"
+            "VIP на 30 дней — <b>100 💎</b>\n\n"
+            "🌱 +1 грядка\n"
+            "🎁 +100 🪙 к ежедневному бонусу\n"
+            "✨ VIP-статус в профиле\n\n"
+            "Купить: <code>купить вип</code>"
+        )
+        return
+
+    if text in ["купить вип", "купить vip", "вип купить"]:
+        ok, balance, until = database.buy_vip(user_id, price=100, days=30)
+        if not ok:
+            await message.answer(
+                f"❌ Не хватает 💎 сапов. Нужно <b>100</b>, у тебя <b>{balance}</b>.\n\n"
+                "Приглашай друзей — за каждого нового пользователя начисляется 💎."
+            )
+            return
+        await message.answer(
+            "👑 <b>VIP активирован на 30 дней!</b>\n\n"
+            "🌱 +1 грядка\n"
+            "🎁 +100 🪙 к ежедневному бонусу\n"
+            "✨ VIP-статус в профиле\n\n"
+            "Спасибо, что развиваешь Sapronem 💎"
+        )
+        return
+
+    # 13. ОГРАНИЧЕНИЕ ЛС
     # Всё, что ниже (топ, ферма, варны, модерация, карма, РП, триггеры) —
     # только для групп. Этот блок обязательно должен идти отдельным
     # верхнеуровневым "if" (не elif), иначе он может случайно перехватить
