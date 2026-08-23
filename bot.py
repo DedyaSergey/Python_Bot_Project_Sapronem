@@ -52,6 +52,8 @@ def admin_menu():
          InlineKeyboardButton(text="➖ Забрать сапы", callback_data="admin_remove_sapy")],
         [InlineKeyboardButton(text="👑 Выдать VIP", callback_data="admin_add_vip"),
          InlineKeyboardButton(text="❌ Снять VIP", callback_data="admin_remove_vip")],
+        [InlineKeyboardButton(text="🏷️ Выдать титул", callback_data="admin_add_title"),
+         InlineKeyboardButton(text="✏️ Сменить ник", callback_data="admin_nickname")],
         [InlineKeyboardButton(text="💳 Платежи", callback_data="admin_payments"),
          InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔄 Обновить ID админов", callback_data="admin_reload")],
@@ -63,6 +65,8 @@ class AdminForm(StatesGroup):
     SAPY_AMOUNT = State()
     VIP_USER = State()
     VIP_DAYS = State()
+    TITLE_ACTION = State()
+    NICKNAME_ACTION = State()
     BROADCAST = State()
 
 # Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
@@ -183,6 +187,12 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
         await state.set_state(AdminForm.VIP_USER)
         await state.update_data(vip_action="remove")
         await callback.message.answer("❌ Введи Telegram ID пользователя:")
+    elif action == "admin_add_title":
+        await state.set_state(AdminForm.TITLE_ACTION)
+        await callback.message.answer("🏷️ Введи через |: <code>ID | Титул</code>\nНапример: <code>123456789 | 🐉 Дракон</code>\n\nВарианты: 👑 Легенда · 🐉 Дракон · 🔥 Огненный · ⚡ Молния · 🌙 Ночной · 💎 Богатей · 🐺 Волк · 🏆 Чемпион")
+    elif action == "admin_nickname":
+        await state.set_state(AdminForm.NICKNAME_ACTION)
+        await callback.message.answer("✏️ Введи через |: <code>ID | Ник</code>\nЧтобы сбросить ник: <code>ID | -</code>")
     elif action == "admin_payments":
         rows = database.admin_payment_history()
         if not rows:
@@ -207,13 +217,17 @@ async def admin_find_user(message: types.Message, state: FSMContext):
     uid = int(message.text.strip())
     profile, premium, referrals = database.admin_user(uid)
     name = profile[0] if profile else "нет профиля"
+    display_name = database.get_display_name(uid, name)
+    title = database.get_user_title(uid)
     vip_until = premium[1]
     vip = time.strftime("%d.%m.%Y %H:%M", time.localtime(vip_until)) if vip_until > int(time.time()) else "нет"
     await state.clear()
+    title_line = f"Титул: <b>{html.escape(title)}</b>\n" if title else "Титул: <i>нет</i>\n"
     await message.answer(
         "👤 <b>Пользователь</b>\n\n"
         f"ID: <code>{uid}</code>\n"
-        f"Имя: <b>{name}</b>\n"
+        f"Ник: <b>{html.escape(display_name)}</b>\n"
+        f"{title_line}"
         f"💎 Сапы: <b>{premium[0]}</b>\n"
         f"👑 VIP до: <b>{vip}</b>\n"
         f"👥 Пригласил: <b>{referrals}</b>"
@@ -256,6 +270,42 @@ async def admin_vip_action(message: types.Message, state: FSMContext):
     until = database.admin_set_vip_days(uid, days)
     await state.clear()
     await message.answer(f"👑 VIP выдан пользователю <code>{uid}</code> на <b>{days} дней</b>.\nДо: <b>{time.strftime('%d.%m.%Y %H:%M', time.localtime(until))}</b>")
+
+@dp.message(AdminForm.TITLE_ACTION, F.chat.type == "private")
+async def admin_title_action(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    parts = (message.text or "").split("|", 1)
+    if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip():
+        await message.answer("❌ Формат: <code>ID | Титул</code>")
+        return
+    uid = int(parts[0].strip())
+    title = parts[1].strip()
+    database.admin_grant_title(uid, title, equip=True)
+    await state.clear()
+    await message.answer(f"✅ Титул <b>{html.escape(title)}</b> выдан <code>{uid}</code> и установлен.")
+
+@dp.message(AdminForm.NICKNAME_ACTION, F.chat.type == "private")
+async def admin_nickname_action(message: types.Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        await state.clear(); return
+    parts = (message.text or "").split("|", 1)
+    if len(parts) != 2 or not parts[0].strip().isdigit():
+        await message.answer("❌ Формат: <code>ID | Ник</code>")
+        return
+    uid = int(parts[0].strip())
+    nickname = parts[1].strip()
+    if nickname == "-":
+        database.clear_custom_nickname(uid)
+        result = "сброшен — снова используется имя Telegram"
+    else:
+        if len(nickname) > 32:
+            await message.answer("❌ Ник максимум 32 символа.")
+            return
+        database.set_custom_nickname(uid, nickname)
+        result = f"установлен: <b>{html.escape(nickname)}</b>"
+    await state.clear()
+    await message.answer(f"✏️ Ник пользователя <code>{uid}</code> {result}.")
 
 @dp.message(AdminForm.BROADCAST, F.chat.type == "private")
 async def admin_broadcast(message: types.Message, state: FSMContext):
@@ -381,6 +431,7 @@ def build_profile_text(target_user, chat_id=0):
 
     name, age, city, bio, _photo_id = profile
     username = f"@{target_user.username}" if target_user.username else target_user.full_name
+    display_name = database.get_display_name(uid, target_user.full_name)
     vip_left = database.vip_seconds_left(uid)
     if vip_left:
         days = vip_left // 86400
@@ -400,8 +451,9 @@ def build_profile_text(target_user, chat_id=0):
     days_in_game = max(1, (int(time.time()) - first_seen) // 86400 + 1) if first_seen else 0
 
     lines = [
-        f"👤 <b>{html.escape(name)}</b>",
+        f"👤 <b>{html.escape(display_name)}</b>",
         f"🔹 {html.escape(username)}",
+        f"🪪 Имя профиля: <b>{html.escape(name)}</b>",
         title_line.rstrip(),
         "",
         f"🎂 Возраст: <b>{age}</b>",
@@ -597,7 +649,9 @@ async def group_help_callback(callback: types.CallbackQuery):
         "👑 <code>сезон</code> — недельный сезон и награды\n"
         "🎉 <code>событие</code> — текущее событие\n"
         "🎲 <code>кубы</code> / <code>топ кубы</code>\n"
-        "👤 <code>анкета</code> — твой профиль (или ответом на сообщение)\n"
+        "👤 <code>профиль</code> — твой профиль (или ответом на сообщение)\n"
+        "🏷️ <code>титулы</code> — коллекция титулов\n"
+        "✏️ <code>+ник Имя</code> / <code>-ник</code> — изменить ник\n"
         "⭐ <code>карма</code> — репутация\n"
         "💍 <code>брак</code> — предложить брак ответом на сообщение\n"
         "🎭 RP-команды — ответом на сообщение.\n"
@@ -640,9 +694,13 @@ def build_season_text(chat_id, user_id):
         medals = ["🥇", "🥈", "🥉"]
         for i, (_uid, user_name, points) in enumerate(top_rows, 1):
             medal = medals[i - 1] if i <= 3 else f"{i}."
-            # Обычный текст: никакой tg://user ссылки и никакой кликабельности.
-            display_name = html.escape(str(user_name or "Игрок"))
-            lines.append(f"{medal} {display_name} — <b>{points}</b> очк.")
+            # Кликабельное упоминание ведёт на профиль Telegram; отображается
+            # именно кастомный ник, а при его отсутствии — обычное имя.
+            display_name = database.get_display_name(_uid, user_name or "Игрок")
+            title = database.get_user_title(_uid)
+            label = f"{title} · {display_name}" if title else display_name
+            mention = f'<a href="tg://user?id={_uid}">{html.escape(label)}</a>'
+            lines.append(f"{medal} <b>{mention}</b> — <b>{points}</b> очк.")
 
     my_points = database.get_season_points(chat_id, user_id)
     claimed, place, coins, sapy = database.claim_previous_season_rewards(chat_id, user_id)
@@ -782,7 +840,7 @@ async def process_photo_invalid(message: types.Message, state: FSMContext):
 async def handle_messages(message: types.Message):
     text = message.text.lower().strip()
     chat_id, user_id = message.chat.id, message.from_user.id
-    user_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+    user_name = database.get_display_name(message.from_user.id, message.from_user.full_name)
     database.touch_activity(user_id, chat_id, count_message=(message.chat.type in ["group", "supergroup"]))
 
     if message.chat.type in ["group", "supergroup"]:
@@ -819,9 +877,14 @@ async def handle_messages(message: types.Message):
         if database.check_marriage(chat_id, user_id) or database.check_marriage(chat_id, target.id):
             await message.reply("Кто-то из вас уже состоит в браке! 💔")
             return
-        PROPOSED_MARRIAGES[chat_id] = (user_id, user_name, target.id, target.full_name)
-        t_men = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
-        f_men = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+        target_display = database.get_display_name(target.id, target.full_name)
+        target_title = database.get_user_title(target.id)
+        target_label = f"{target_title} · {target_display}" if target_title else target_display
+        PROPOSED_MARRIAGES[chat_id] = (user_id, user_name, target.id, target_display)
+        t_men = f'<a href="tg://user?id={target.id}">{html.escape(target_label)}</a>'
+        my_title = database.get_user_title(user_id)
+        my_label = f"{my_title} · {user_name}" if my_title else user_name
+        f_men = f'<a href="tg://user?id={user_id}">{html.escape(my_label)}</a>'
         await message.answer(f"💍 {t_men}, пользователь {f_men} предлагает вам брак!\nВы должны ответить <code>согласен</code> или <code>отказ</code>.")
         return
 
@@ -831,8 +894,14 @@ async def handle_messages(message: types.Message):
             u1_id, u1_name, u2_id, u2_name = PROPOSED_MARRIAGES[chat_id]
             database.create_marriage(chat_id, u1_id, u1_name, u2_id, u2_name)
             del PROPOSED_MARRIAGES[chat_id]
-            u1_men = f'<a href="tg://user?id={u1_id}">{u1_name}</a>'
-            u2_men = f'<a href="tg://user?id={u2_id}">{u2_name}</a>'
+            u1_display = database.get_display_name(u1_id, u1_name)
+            u2_display = database.get_display_name(u2_id, u2_name)
+            u1_title = database.get_user_title(u1_id)
+            u2_title = database.get_user_title(u2_id)
+            u1_label = f"{u1_title} · {u1_display}" if u1_title else u1_display
+            u2_label = f"{u2_title} · {u2_display}" if u2_title else u2_display
+            u1_men = f'<a href="tg://user?id={u1_id}">{html.escape(u1_label)}</a>'
+            u2_men = f'<a href="tg://user?id={u2_id}">{html.escape(u2_label)}</a>'
             await message.answer(f"🎉 Поздравляем! {u2_men} принял предложение о браке!. 👨‍⚖️ С сегодняшнего дня {u1_men} и {u2_men} теперь официально состоят в браке! 🍾❤️")
             return
 
@@ -923,7 +992,58 @@ async def handle_messages(message: types.Message):
         await message.answer(top.build_top_dice_text(chat_id))
         return
 
-    # 11. ПРОФИЛЬ
+    # 11. ТИТУЛЫ
+    if text in ["титулы", "титул"] or text.startswith("титул "):
+        titles = database.get_user_titles(user_id)
+        current = database.get_user_title(user_id)
+        if text == "титулы" or text == "титул":
+            lines = ["🏷️ <b>Твои титулы</b>", ""]
+            if current:
+                lines.append(f"✨ Сейчас: <b>{html.escape(current)}</b>")
+                lines.append("")
+            if titles:
+                for i, title in enumerate(titles, 1):
+                    mark = "✅" if title == current else "▫️"
+                    lines.append(f"{mark} <code>{i}</code>. {html.escape(title)}")
+                lines.append("")
+                lines.append("Чтобы установить: <code>титул 1</code>")
+            else:
+                lines.append("У тебя пока нет титулов.")
+            await message.answer("\n".join(lines))
+            return
+        arg = text.removeprefix("титул ").strip()
+        chosen = None
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if 0 <= idx < len(titles):
+                chosen = titles[idx]
+        else:
+            chosen = next((t for t in titles if t.lower() == arg.lower()), None)
+        if not chosen:
+            await message.answer("❌ Такого титула нет в твоей коллекции. Напиши <code>титулы</code>.")
+            return
+        database.set_user_title(user_id, chosen)
+        await message.answer(f"🏷️ Титул установлен: <b>{html.escape(chosen)}</b>")
+        return
+
+    # 11. НИК
+    if text.startswith("+ник"):
+        nickname = message.text[4:].strip()
+        if not nickname:
+            await message.answer("✏️ Напиши так: <code>+ник ТвойНик</code>")
+            return
+        if len(nickname) > 32:
+            await message.answer("❌ Ник максимум 32 символа.")
+            return
+        database.set_custom_nickname(user_id, nickname)
+        await message.answer(f"✅ Ник установлен: <b>{html.escape(nickname)}</b>")
+        return
+    if text == "-ник":
+        database.clear_custom_nickname(user_id)
+        await message.answer(f"✅ Ник сброшен. Теперь используется имя Telegram: <b>{html.escape(message.from_user.full_name)}</b>")
+        return
+
+    # 12. ПРОФИЛЬ
     if text in ["профиль", "мой профиль", "мой профайл", "анкета"]:
         is_reply = bool(message.reply_to_message)
         target = message.reply_to_message.from_user if is_reply else message.from_user
@@ -1139,7 +1259,10 @@ async def handle_messages(message: types.Message):
         cursor.execute("SELECT warns FROM reputation WHERE chat_id = ? AND user_id = ?", (chat_id, target.id))
         res = cursor.fetchone()
         user_warns = res[0] if res else 0
-        mention = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
+        target_display = database.get_display_name(target.id, target.full_name)
+        target_title = database.get_user_title(target.id)
+        target_label = f"{target_title} · {target_display}" if target_title else target_display
+        mention = f'<a href="tg://user?id={target.id}">{html.escape(target_label)}</a>'
         await message.answer(f"⚠️ Предупреждения {mention}: <b>{user_warns}/3</b>")
         return
 
@@ -1154,7 +1277,10 @@ async def handle_messages(message: types.Message):
             await message.answer("Ответите этой командой на сообщение!")
             return
         target = message.reply_to_message.from_user
-        t_mention = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
+        target_display = database.get_display_name(target.id, target.full_name)
+        target_title = database.get_user_title(target.id)
+        target_label = f"{target_title} · {target_display}" if target_title else target_display
+        t_mention = f'<a href="tg://user?id={target.id}">{html.escape(target_label)}</a>'
         try:
             if text.startswith(("бан", "/ban")):
                 await bot.ban_chat_member(chat_id, target.id)
@@ -1214,7 +1340,7 @@ async def handle_messages(message: types.Message):
         if text in ["карма", "стата"]:
             target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
             val = database.get_karma(chat_id, target.id)
-            await message.answer(f"Репутация {target.full_name}: <b>{val}</b> очков. 🏆")
+            await message.answer(f"Репутация {html.escape(database.get_display_name(target.id, target.full_name))}: <b>{val}</b> очков. 🏆")
             return
         if not message.reply_to_message: return
         target = message.reply_to_message.from_user
@@ -1223,7 +1349,7 @@ async def handle_messages(message: types.Message):
             return
         change = 1 if text in ["+", "плюс", "спасибо"] else -1
         new_val = database.update_karma(chat_id, target.id, change)
-        await message.answer(f"📊 Карма пользователя {target.full_name} изменена!\nТекущая карма: <b>{new_val}</b>")
+        await message.answer(f"📊 Карма пользователя {html.escape(database.get_display_name(target.id, target.full_name))} изменена!\nТекущая карма: <b>{new_val}</b>")
         return
 
     # 20. РП КОМАНДЫ
@@ -1234,8 +1360,13 @@ async def handle_messages(message: types.Message):
             return
         target = message.reply_to_message.from_user
         emoji, act = rp_action
-        f_men = f'<a href="tg://user?id={user_id}">{user_name}</a>'
-        t_men = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
+        my_title = database.get_user_title(user_id)
+        my_label = f"{my_title} · {user_name}" if my_title else user_name
+        target_display = database.get_display_name(target.id, target.full_name)
+        target_title = database.get_user_title(target.id)
+        target_label = f"{target_title} · {target_display}" if target_title else target_display
+        f_men = f'<a href="tg://user?id={user_id}">{html.escape(my_label)}</a>'
+        t_men = f'<a href="tg://user?id={target.id}">{html.escape(target_label)}</a>'
         await message.answer(f"{emoji} {f_men} {act} {t_men}")
         return
 

@@ -462,10 +462,11 @@ def get_first_seen(user_id):
     return row[0] if row else 0
 
 def get_top_dice(chat_id, limit=10):
+    """Возвращает (user_id, user_name, dice_score) для кликабельного топа."""
     cursor.execute("""
-    SELECT user_name, dice_score FROM reputation 
+    SELECT user_id, user_name, dice_score FROM reputation
     WHERE chat_id = ? AND dice_score > 0
-    ORDER BY dice_score DESC LIMIT ?
+    ORDER BY dice_score DESC, user_id ASC LIMIT ?
     """, (chat_id, limit))
     return cursor.fetchall()
 
@@ -713,6 +714,19 @@ def init_shop_db():
         title TEXT
     )
     """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_titles (
+        user_id INTEGER,
+        title TEXT,
+        PRIMARY KEY (user_id, title)
+    )
+    """)
+    try:
+        cursor.execute("ALTER TABLE user_cosmetics ADD COLUMN nickname TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # Переносим уже купленные старые титулы в коллекцию титулов.
+    cursor.execute("INSERT OR IGNORE INTO user_titles(user_id, title) SELECT user_id, title FROM user_cosmetics WHERE title IS NOT NULL AND title != ''")
     items = [
         ("title_star", "🌟 Титул «Звезда»", "Показывается в профиле.", 50, "title"),
         ("title_farmer", "🌾 Титул «Фермер»", "Показывается в профиле.", 75, "title"),
@@ -747,11 +761,7 @@ def buy_shop_item(user_id, item_id):
         activate_vip(user_id, days)
     elif item_type == "title":
         title = "🌟 Звезда" if item_id == "title_star" else "🌾 Фермер"
-        cursor.execute("""
-        INSERT INTO user_cosmetics(user_id, title) VALUES (?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET title = excluded.title
-        """, (user_id, title))
-        conn.commit()
+        grant_title(user_id, title, equip=True)
     else:
         cursor.execute("""
         INSERT INTO user_inventory(user_id, item_id, quantity) VALUES (?, ?, 1)
@@ -764,7 +774,59 @@ def buy_shop_item(user_id, item_id):
 def get_user_title(user_id):
     cursor.execute("SELECT title FROM user_cosmetics WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
-    return row[0] if row else None
+    return row[0] if row and row[0] else None
+
+
+def get_user_titles(user_id):
+    cursor.execute("SELECT title FROM user_titles WHERE user_id = ? ORDER BY title", (user_id,))
+    return [row[0] for row in cursor.fetchall()]
+
+
+def grant_title(user_id, title, equip=False):
+    title = (title or "").strip()
+    if not title:
+        return False
+    cursor.execute("INSERT OR IGNORE INTO user_titles(user_id, title) VALUES (?, ?)", (user_id, title))
+    if equip:
+        cursor.execute("INSERT INTO user_cosmetics(user_id, title) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET title=excluded.title", (user_id, title))
+    conn.commit()
+    return True
+
+
+def set_user_title(user_id, title):
+    titles = get_user_titles(user_id)
+    if title not in titles:
+        return False
+    cursor.execute("INSERT INTO user_cosmetics(user_id, title) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET title=excluded.title", (user_id, title))
+    conn.commit()
+    return True
+
+
+def clear_user_title(user_id):
+    cursor.execute("INSERT INTO user_cosmetics(user_id, title) VALUES (?, NULL) ON CONFLICT(user_id) DO UPDATE SET title=NULL", (user_id,))
+    conn.commit()
+
+
+def get_custom_nickname(user_id):
+    cursor.execute("SELECT nickname FROM user_cosmetics WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_custom_nickname(user_id, nickname):
+    nickname = (nickname or "").strip()
+    cursor.execute("INSERT INTO user_cosmetics(user_id, nickname) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET nickname=excluded.nickname", (user_id, nickname or None))
+    conn.commit()
+
+
+def clear_custom_nickname(user_id):
+    cursor.execute("UPDATE user_cosmetics SET nickname=NULL WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+def get_display_name(user_id, fallback_name="Игрок"):
+    nickname = get_custom_nickname(user_id)
+    return nickname or fallback_name or "Игрок"
 
 
 def get_inventory_quantity(user_id, item_id):
@@ -856,6 +918,18 @@ def admin_user(user_id):
     cursor.execute("SELECT COUNT(*) FROM user_meta WHERE referred_by = ?", (user_id,))
     referrals = cursor.fetchone()[0]
     return profile, premium, referrals
+
+
+
+def admin_grant_title(user_id, title, equip=True):
+    ensure_premium_user(user_id)
+    return grant_title(user_id, title, equip=equip)
+
+
+
+def admin_grant_title(user_id, title, equip=True):
+    ensure_premium_user(user_id)
+    return grant_title(user_id, title, equip=equip)
 
 def admin_add_sapy(user_id, amount):
     ensure_premium_user(user_id)

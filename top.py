@@ -1,10 +1,14 @@
+import html
 import database as db
 
 MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
 def mention(user_id: int, name: str) -> str:
-    return f'<a href="tg://user?id={user_id}">{name}</a>'
+    display = db.get_display_name(user_id, name)
+    title = db.get_user_title(user_id)
+    label = f"{title} · {display}" if title else display
+    return f'<a href="tg://user?id={user_id}">{html.escape(label)}</a>'
 
 
 def build_top_messages_text(chat_id: int) -> str:
@@ -15,7 +19,7 @@ def build_top_messages_text(chat_id: int) -> str:
     lines = ["<b>📊 Топ по количеству сообщений:</b>\n"]
     for i, (user_id, user_name, count) in enumerate(rows, start=1):
         place = MEDALS.get(i, f"{i}.")
-        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b>")
+        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b> соо")
     return "\n".join(lines)
 
 
@@ -25,7 +29,12 @@ def build_top_dice_text(chat_id: int) -> str:
         return "🎲 В кубы в этом чате еще никто не играл!"
 
     lines = ["<b>🏆 Топ везунчиков чата по кубам:</b>\n"]
-    for i, (user_name, total_score) in enumerate(rows, start=1):
+    for i, (user_id, user_name, total_score) in enumerate(rows, start=1):
         place = MEDALS.get(i, f"{i}.")
-        lines.append(f"{place} <b>{user_name}</b> — {total_score} очков 🎲")
+        label = db.get_display_name(user_id, user_name)
+        title = db.get_user_title(user_id)
+        if title:
+            label = f"{title} · {label}"
+        mention = f'<a href="tg://user?id={user_id}">{html.escape(label)}</a>'
+        lines.append(f"{place} <b>{mention}</b> — {total_score} очков 🎲")
     return "\n".join(lines)
