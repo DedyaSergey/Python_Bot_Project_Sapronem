@@ -965,7 +965,7 @@ async def handle_messages(message: types.Message):
     # верхнеуровневым "if" (не elif), иначе он может случайно перехватить
     # часть команд, написанных в группе.
     if message.chat.type in ["private"]:
-        await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота!")
+        await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота! <3 ")
         return
 
     # 13. ЕЖЕДНЕВНЫЙ БОНУС
@@ -1096,7 +1096,7 @@ async def handle_messages(message: types.Message):
                         can_add_web_page_previews=True
                     )
                 )
-                await message.answer(f"🔊 Пользователь {t_mention} размучен!")
+                await message.answer(f"🔊 Пользователь {t_mention} был размучен!")
             elif text.startswith("мут"):
                 parts = message.text.split(maxsplit=2)
                 duration_str = "5м"
@@ -1130,7 +1130,7 @@ async def handle_messages(message: types.Message):
         if target.id == user_id:
             await message.answer("Нельзя изменять карму самому себе! ❌")
             return
-        change = 1 if text in ["+", "плюс", "спасибо"] else -1
+        change = 1 if text in ["+", "плюс", "спасибо", "красава"] else -1
         new_val = database.update_karma(chat_id, target.id, change)
         await message.answer(f"📊 Карма пользователя {target.full_name} изменена!\nТекущая карма: <b>{new_val}</b>")
         return
