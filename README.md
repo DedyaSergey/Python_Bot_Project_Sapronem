@@ -1,8 +1,14 @@
-# Sapronem 1.5.2
+# Sapronem 1.5.3
 
+## Railway Variables
+- `TOKEN` — Telegram bot token
+- `DB_PATH` — путь к постоянной SQLite базе (например `/data/bot.db`)
+- `ADMIN_IDS` — Telegram ID владельца/админов, через запятую
 
 ## Админка
-Доступ только для ID из указанного белого списка.
+В личке боту: `/admin`
+
+Доступ только для ID из `ADMIN_IDS`.
 
 Возможности:
 - статистика;

@@ -247,6 +247,21 @@ def get_season_top(chat_id, season_id=None, limit=10):
     cursor.execute("""SELECT user_id, points FROM season_points WHERE season_id=? AND chat_id=? ORDER BY points DESC LIMIT ?""", (season_id,chat_id,limit))
     return cursor.fetchall()
 
+def get_season_top_named(chat_id, season_id=None, limit=10):
+    """Топ сезона вместе с сохранённым никнеймом/именем.
+    Возвращает (user_id, user_name, points).
+    """
+    season_id = season_id or current_season_id()
+    cursor.execute("""
+        SELECT s.user_id, COALESCE(NULLIF(r.user_name, ''), 'Игрок'), s.points
+        FROM season_points s
+        LEFT JOIN reputation r ON r.chat_id = s.chat_id AND r.user_id = s.user_id
+        WHERE s.season_id=? AND s.chat_id=?
+        ORDER BY s.points DESC, s.user_id ASC
+        LIMIT ?
+    """, (season_id, chat_id, limit))
+    return cursor.fetchall()
+
 def claim_previous_season_rewards(chat_id, user_id):
     season = previous_season_id()
     top = get_season_top(chat_id, season, 50)

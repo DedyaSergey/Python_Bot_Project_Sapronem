@@ -2,6 +2,7 @@ import asyncio
 import time
 import random
 import logging
+import html
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
@@ -542,26 +543,53 @@ def build_daily_quest_text(chat_id, user_id):
     return f"📜 <b>Ежедневное задание</b>\n\n{q['title']}\n{status}\n\n🎁 Награда: <b>50 🪙 + 5 💎</b>"
 
 def build_season_text(chat_id, user_id):
+    # Показываем только номер сезона, без технического идентификатора вроде 2026-W34.
     season = database.current_season_id()
-    top_rows = database.get_season_top(chat_id, season, 10)
-    lines = [f"👑 <b>Сезон {season}</b>", "", "Очки сезона получаются за активность в группе.", ""]
+    try:
+        season_number = int(season.split("-W")[-1])
+    except (ValueError, IndexError):
+        season_number = season
+
+    top_rows = database.get_season_top_named(chat_id, season, 10)
+    lines = [
+        f"👑 <b>Сезон #{season_number}</b>",
+        "",
+        "📈 Очки сезона получаются за активность в группе.",
+        "",
+    ]
+
     if not top_rows:
-        lines.append("Пока очков нет — стань первым!")
+        lines.append("Пока очков нет — стань первым! 🚀")
     else:
+        lines.append("🏆 <b>Топ сезона</b>")
         medals = ["🥇", "🥈", "🥉"]
-        for i, (uid, points) in enumerate(top_rows, 1):
-            medal = medals[i-1] if i <= 3 else f"{i}."
-            lines.append(f"{medal} <a href=\"tg://user?id={uid}\">Игрок</a> — <b>{points}</b> очк.")
+        for i, (_uid, user_name, points) in enumerate(top_rows, 1):
+            medal = medals[i - 1] if i <= 3 else f"{i}."
+            # Обычный текст: никакой tg://user ссылки и никакой кликабельности.
+            display_name = html.escape(str(user_name or "Игрок"))
+            lines.append(f"{medal} {display_name} — <b>{points}</b> очк.")
+
     my_points = database.get_season_points(chat_id, user_id)
     claimed, place, coins, sapy = database.claim_previous_season_rewards(chat_id, user_id)
     if claimed:
-        lines.append(f"\n🎉 Ты занял <b>{place}</b>-е место в прошлом сезоне и получил награду!")
-    lines.append(f"\nТвои очки: <b>{my_points}</b>")
-    lines.append("🏆 <b>Награды топ-50 прошлого сезона:</b>")
-    lines.append("🥇 1: 1000🪙 + 100💎 | 🥈 2: 750🪙 + 75💎 | 🥉 3: 500🪙 + 50💎")
-    lines.append("4–5: 350🪙 + 35💎 | 6–10: 250🪙 + 25💎")
-    lines.append("11–20: 175🪙 + 15💎 | 21–30: 125🪙 + 10💎")
-    lines.append("31–40: 75🪙 + 7💎 | 41–50: 50🪙 + 5💎")
+        lines.extend(["", f"🎉 Ты занял <b>{place}</b>-е место в прошлом сезоне и получил награду!"])
+
+    lines.extend([
+        "",
+        f"🎯 <b>Твои очки:</b> {my_points}",
+        "",
+        "🎁 <b>Награды топ-50 прошлого сезона</b>",
+        "",
+        "🥇 <b>1 место</b> — 1000 🪙 + 100 💎",
+        "🥈 <b>2 место</b> — 750 🪙 + 75 💎",
+        "🥉 <b>3 место</b> — 500 🪙 + 50 💎",
+        "🏅 <b>4–5 места</b> — 350 🪙 + 35 💎",
+        "🏅 <b>6–10 места</b> — 250 🪙 + 25 💎",
+        "🎖 <b>11–20 места</b> — 175 🪙 + 15 💎",
+        "🎖 <b>21–30 места</b> — 125 🪙 + 10 💎",
+        "🎖 <b>31–40 места</b> — 75 🪙 + 7 💎",
+        "🎖 <b>41–50 места</b> — 50 🪙 + 5 💎",
+    ])
     return "\n".join(lines)
 
 async def send_daily_bonus(message: types.Message, user: types.User):
@@ -678,7 +706,8 @@ async def process_photo_invalid(message: types.Message, state: FSMContext):
 @dp.message(F.text)
 async def handle_messages(message: types.Message):
     text = message.text.lower().strip()
-    chat_id, user_id, user_name = message.chat.id, message.from_user.id, message.from_user.full_name
+    chat_id, user_id = message.chat.id, message.from_user.id
+    user_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
 
     if message.chat.type in ["group", "supergroup"]:
         database.log_message(chat_id, user_id, user_name)
