@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 conn = sqlite3.connect("")
 cursor = conn.cursor()
@@ -16,6 +17,13 @@ def init_db():
         PRIMARY KEY (chat_id, user_id)
     )
     """)
+
+    # Миграция: добавляем колонку coins, если её ещё нет (для уже существующей базы)
+    try:
+        cursor.execute("ALTER TABLE reputation ADD COLUMN coins INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # колонка уже есть
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS profiles (
         user_id INTEGER PRIMARY KEY,
@@ -45,6 +53,19 @@ def init_db():
         PRIMARY KEY (chat_id, keyword)
     )
     """)
+
+    # Таблица фермы: у каждого юзера в чате несколько грядок (plot_number)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farms (
+        chat_id INTEGER,
+        user_id INTEGER,
+        plot_number INTEGER,
+        crop TEXT,
+        planted_at INTEGER,
+        PRIMARY KEY (chat_id, user_id, plot_number)
+    )
+    """)
+
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ТРИГГЕРОВ ---
@@ -133,8 +154,9 @@ def update_karma(chat_id, user_id, change):
     return get_karma(chat_id, user_id)
 
 def get_top_messages(chat_id, limit=10):
+    """Возвращает (user_id, user_name, messages_all) — user_id нужен для кликабельного упоминания"""
     cursor.execute("""
-    SELECT user_name, messages_all FROM reputation 
+    SELECT user_id, user_name, messages_all FROM reputation 
     WHERE chat_id = ? AND messages_all > 0
     ORDER BY messages_all DESC LIMIT ?
     """, (chat_id, limit))
@@ -169,3 +191,53 @@ def get_top_dice(chat_id, limit=10):
     ORDER BY dice_score DESC LIMIT ?
     """, (chat_id, limit))
     return cursor.fetchall()
+
+
+# --- ФУНКЦИИ ДЛЯ МОНЕТ (валюта фермы) ---
+def get_coins(chat_id, user_id):
+    cursor.execute("SELECT coins FROM reputation WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    result = cursor.fetchone()
+    return result[0] if result else 0
+
+def add_coins(chat_id, user_id, amount):
+    """amount может быть отрицательным (списание за семена)"""
+    cursor.execute("""
+    INSERT INTO reputation (chat_id, user_id, coins) 
+    VALUES (?, ?, ?) 
+    ON CONFLICT(chat_id, user_id) DO UPDATE SET coins = coins + ?
+    """, (chat_id, user_id, amount, amount))
+    conn.commit()
+    return get_coins(chat_id, user_id)
+
+
+# --- ФУНКЦИИ ДЛЯ ФЕРМЫ ---
+FARM_PLOTS = 3  # сколько грядок доступно каждому игроку
+
+def get_farm(chat_id, user_id):
+    """Возвращает список из FARM_PLOTS элементов: (plot_number, crop, planted_at) или (plot_number, None, None)"""
+    cursor.execute("""
+    SELECT plot_number, crop, planted_at FROM farms 
+    WHERE chat_id = ? AND user_id = ?
+    """, (chat_id, user_id))
+    existing = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
+    plots = []
+    for i in range(1, FARM_PLOTS + 1):
+        crop, planted_at = existing.get(i, (None, None))
+        plots.append((i, crop, planted_at))
+    return plots
+
+def plant_crop(chat_id, user_id, plot_number, crop):
+    planted_at = int(time.time())
+    cursor.execute("""
+    INSERT INTO farms (chat_id, user_id, plot_number, crop, planted_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(chat_id, user_id, plot_number) DO UPDATE SET crop = ?, planted_at = ?
+    """, (chat_id, user_id, plot_number, crop, planted_at, crop, planted_at))
+    conn.commit()
+
+def clear_plot(chat_id, user_id, plot_number):
+    cursor.execute("""
+    DELETE FROM farms WHERE chat_id = ? AND user_id = ? AND plot_number = ?
+    """, (chat_id, user_id, plot_number))
+    conn.commit()
