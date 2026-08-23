@@ -19,7 +19,7 @@ def build_top_messages_text(chat_id: int) -> str:
     lines = ["<b>📊 Топ по количеству сообщений:</b>\n"]
     for i, (user_id, user_name, count) in enumerate(rows, start=1):
         place = MEDALS.get(i, f"{i}.")
-        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b> соо")
+        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b> ")
     return "\n".join(lines)
 
 
