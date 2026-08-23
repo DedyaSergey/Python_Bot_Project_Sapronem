@@ -117,6 +117,19 @@ def init_db():
     )
     """)
 
+    # История покупок за Telegram Stars. telegram_payment_charge_id уникален,
+    # поэтому повторная доставка одного платежа не начислит сапы второй раз.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS star_payments (
+        telegram_payment_charge_id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        stars INTEGER NOT NULL,
+        sapy INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    )
+    """)
+
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ТРИГГЕРОВ ---
@@ -370,6 +383,23 @@ def add_sapy(user_id, amount):
     cursor.execute("UPDATE premium_wallet SET sapy = MAX(0, sapy + ?) WHERE user_id = ?", (amount, user_id))
     conn.commit()
     return get_sapy(user_id)
+
+
+def apply_star_payment(user_id, charge_id, payload, stars, sapy):
+    """Начисляет сапы за подтверждённый Telegram Stars-платёж ровно один раз."""
+    ensure_premium_user(user_id)
+    now = int(time.time())
+    try:
+        cursor.execute("""
+        INSERT INTO star_payments(telegram_payment_charge_id, user_id, payload, stars, sapy, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (charge_id, user_id, payload, stars, sapy, now))
+        cursor.execute("UPDATE premium_wallet SET sapy = sapy + ? WHERE user_id = ?", (sapy, user_id))
+        conn.commit()
+        return True, get_sapy(user_id)
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return False, get_sapy(user_id)
 
 
 def spend_sapy(user_id, amount):

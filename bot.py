@@ -5,7 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import os
@@ -25,6 +25,13 @@ dp = Dispatcher()
 
 DICE_COOLDOWN = {}
 PROPOSED_MARRIAGES = {}
+
+# Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
+STAR_PACKAGES = {
+    "50": {"stars": 50, "sapy": 500, "title": "💎 500 сапов"},
+    "150": {"stars": 150, "sapy": 1650, "title": "💎 1 650 сапов"},
+    "500": {"stars": 500, "sapy": 6000, "title": "💎 6 000 сапов"},
+}
 
 class ProfileForm(StatesGroup):
     SET_NAME = State()
@@ -53,6 +60,50 @@ def group_menu():
         [InlineKeyboardButton(text="🏆 Топ", callback_data="group_top"),
          InlineKeyboardButton(text="❓ Команды", callback_data="group_help")],
     ])
+
+
+@dp.pre_checkout_query()
+async def pre_checkout_handler(query: types.PreCheckoutQuery):
+    payload = query.invoice_payload or ""
+    if not payload.startswith("sapy_"):
+        await query.answer(ok=False, error_message="Неизвестный товар.")
+        return
+    key = payload.removeprefix("sapy_")
+    pkg = STAR_PACKAGES.get(key)
+    if not pkg or query.currency != "XTR" or query.total_amount != pkg["stars"]:
+        await query.answer(ok=False, error_message="Параметры заказа не совпадают. Попробуй оформить покупку ещё раз.")
+        return
+    await query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def successful_payment_handler(message: types.Message):
+    payment = message.successful_payment
+    payload = payment.invoice_payload or ""
+    if not payload.startswith("sapy_") or payment.currency != "XTR":
+        return
+    key = payload.removeprefix("sapy_")
+    pkg = STAR_PACKAGES.get(key)
+    if not pkg or payment.total_amount != pkg["stars"]:
+        logger.error("Invalid Stars payment payload/amount: user=%s payload=%s amount=%s", message.from_user.id, payload, payment.total_amount)
+        await message.answer("❌ Платёж получен, но параметры заказа не совпали. Напиши администратору Sapronem.")
+        return
+    applied, balance = database.apply_star_payment(
+        user_id=message.from_user.id,
+        charge_id=payment.telegram_payment_charge_id,
+        payload=payload,
+        stars=payment.total_amount,
+        sapy=pkg["sapy"],
+    )
+    if applied:
+        await message.answer(
+            f"✅ <b>Платёж успешно получен!</b>\n\n"
+            f"Начислено: <b>+{pkg['sapy']} 💎</b>\n"
+            f"Баланс: <b>{balance} 💎</b>\n\n"
+            "Спасибо за поддержку Sapronem! 💎"
+        )
+    else:
+        await message.answer(f"ℹ️ Этот платёж уже был обработан. Твой баланс: <b>{balance} 💎</b>.")
 
 
 @dp.message(CommandStart(), F.chat.type == "private")
@@ -154,8 +205,34 @@ async def menu_shop(callback: types.CallbackQuery):
         lines.append(f"<b>{name}</b> — {price} 💎\n{description}")
     lines.append("\nПокупка: <code>купить ID</code>, например <code>купить title_star</code>.")
     lines.append("🎁 Подарочный набор можно использовать ответом на сообщение друга командой <code>подарить набор</code>.")
-    await callback.message.answer("\n\n".join(lines))
+    lines.append("\n💳 <b>Пополнить сапы за Telegram Stars:</b>")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{pkg['title']} — {pkg['stars']} ⭐", callback_data=f"buy_stars_{key}")]
+        for key, pkg in STAR_PACKAGES.items()
+    ])
+    await callback.message.answer("\n\n".join(lines), reply_markup=keyboard)
     await callback.answer()
+
+@dp.callback_query(F.data.startswith("buy_stars_"))
+async def buy_stars_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type != "private":
+        await callback.answer("Покупки сапов доступны в ЛС с ботом.", show_alert=True)
+        return
+    key = callback.data.removeprefix("buy_stars_")
+    pkg = STAR_PACKAGES.get(key)
+    if not pkg:
+        await callback.answer("Пакет не найден.", show_alert=True)
+        return
+    await bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title=pkg["title"],
+        description=f"Пополнение баланса Sapronem на {pkg['sapy']} 💎 сапов.",
+        payload=f"sapy_{key}",
+        currency="XTR",
+        prices=[LabeledPrice(label=pkg["title"], amount=pkg["stars"])],
+    )
+    await callback.answer()
+
 
 @dp.callback_query(F.data == "menu_vip")
 async def menu_vip(callback: types.CallbackQuery):
@@ -572,7 +649,12 @@ async def handle_messages(message: types.Message):
         for item_id, name, description, price, item_type in items:
             lines.append(f"<b>{name}</b> — {price} 💎\n{description}\nID: <code>{item_id}</code>")
         lines.append("\nКупить: <code>купить ID</code>")
-        await message.answer("\n\n".join(lines))
+        lines.append("\n💳 <b>Пополнить сапы за Telegram Stars:</b>")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"{pkg['title']} — {pkg['stars']} ⭐", callback_data=f"buy_stars_{key}")]
+            for key, pkg in STAR_PACKAGES.items()
+        ])
+        await message.answer("\n\n".join(lines), reply_markup=keyboard)
         return
 
     if text.startswith("купить "):
