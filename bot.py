@@ -46,7 +46,8 @@ def is_owner(user_id: int) -> bool:
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-         InlineKeyboardButton(text="👤 Пользователь", callback_data="admin_user")],
+         InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
+        [InlineKeyboardButton(text="👤 Пользователь", callback_data="admin_user")],
         [InlineKeyboardButton(text="💎 Выдать сапы", callback_data="admin_add_sapy"),
          InlineKeyboardButton(text="➖ Забрать сапы", callback_data="admin_remove_sapy")],
         [InlineKeyboardButton(text="👑 Выдать VIP", callback_data="admin_add_vip"),
@@ -130,11 +131,42 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.answer(
             "📊 <b>Статистика Sapronem</b>\n\n"
             f"👤 Пользователи: <b>{s['users']}</b>\n"
+            f"📝 Профили: <b>{s['profiles']}</b>\n"
             f"👥 Группы: <b>{s['groups']}</b>\n"
+            f"💬 Сообщения: <b>{s['messages']}</b>\n"
+            f"🔥 Активных за 24ч: <b>{s['active_24h']}</b>\n"
+            f"📅 Активных за 7д: <b>{s['active_7d']}</b>\n"
             f"💎 Сапов в кошельках: <b>{s['sapy']}</b>\n"
             f"👑 Активных VIP: <b>{s['vip']}</b>\n"
             f"💳 Платежей Stars: <b>{s['payments']}</b>\n"
             f"⭐ Получено Stars: <b>{s['stars']}</b>"
+        )
+    elif action == "admin_analytics":
+        s = database.admin_stats()
+        refs = database.admin_top_referrers(5)
+        ref_lines = []
+        for i, (uid, count) in enumerate(refs, 1):
+            ref_lines.append(f"{i}. <code>{uid}</code> — {count} приглаш.")
+        ref_text = "\n".join(ref_lines) if ref_lines else "Пока нет рефералов."
+        conversion = (s['profiles'] / s['users'] * 100) if s['users'] else 0
+        avg_msgs = (s['messages'] / s['memberships']) if s['memberships'] else 0
+        await callback.message.answer(
+            "📈 <b>Аналитика Sapronem</b>\n\n"
+            f"🔥 DAU (24ч): <b>{s['active_24h']}</b>\n"
+            f"📅 WAU (7д): <b>{s['active_7d']}</b>\n"
+            f"👤 Всего пользователей: <b>{s['users']}</b>\n"
+            f"📝 Создали профиль: <b>{s['profiles']}</b> ({conversion:.1f}%)\n"
+            f"👥 Групп: <b>{s['groups']}</b>\n"
+            f"💬 Всего сообщений: <b>{s['messages']}</b>\n"
+            f"📊 В среднем сообщений на участника чатов: <b>{avg_msgs:.1f}</b>\n"
+            f"🎯 Игроков в текущем сезоне: <b>{s['season_players']}</b>\n"
+            f"📜 Заданий забрано сегодня: <b>{s['quests_today']}</b>\n"
+            f"🌱 Посаженных культур сейчас: <b>{s['planted']}</b>\n"
+            f"👥 Пришли по рефералам: <b>{s['referred_users']}</b>\n\n"
+            "🏆 <b>Топ рефереров</b>\n" + ref_text + "\n\n"
+            f"💎 Сапов в экономике: <b>{s['sapy']}</b>\n"
+            f"👑 Активных VIP: <b>{s['vip']}</b>\n"
+            f"⭐ Stars получено: <b>{s['stars']}</b>"
         )
     elif action == "admin_user":
         await state.set_state(AdminForm.USER_ID)
@@ -303,6 +335,7 @@ async def cmd_start_private(message: types.Message, state: FSMContext, command: 
             referred_by = None
 
     existing_referrer = database.get_referral_inviter(message.from_user.id)
+    database.touch_activity(message.from_user.id, message.chat.id)
     saved_referrer = database.register_user(message.from_user.id, referred_by)
     if saved_referrer and existing_referrer is None and saved_referrer != message.from_user.id:
         database.add_sapy(saved_referrer, 10)
@@ -340,6 +373,58 @@ async def create_profile_callback(callback: types.CallbackQuery, state: FSMConte
     await callback.answer()
 
 
+def build_profile_text(target_user, chat_id=0):
+    uid = target_user.id
+    profile = database.get_profile(uid)
+    if not profile:
+        return "❌ Профиль ещё не создан.\n\nНапиши <code>заполнить анкету</code> в ЛС боту."
+
+    name, age, city, bio, _photo_id = profile
+    username = f"@{target_user.username}" if target_user.username else target_user.full_name
+    vip_left = database.vip_seconds_left(uid)
+    if vip_left:
+        days = vip_left // 86400
+        hours = (vip_left % 86400) // 3600
+        vip_line = f"👑 VIP: <b>активен</b> — осталось <b>{days} дн. {hours} ч.</b>"
+    else:
+        vip_line = "👑 VIP: <b>нет</b>"
+
+    title = database.get_user_title(uid)
+    title_line = f"🏷️ Титул: <b>{html.escape(title)}</b>\n" if title else ""
+    karma = database.get_karma(chat_id, uid) if chat_id else 0
+    messages = database.get_user_messages(chat_id, uid) if chat_id else 0
+    dice = database.get_user_dice_score(chat_id, uid) if chat_id else 0
+    sapy = database.get_sapy(uid)
+    refs = database.get_referral_count(uid)
+    first_seen = database.get_first_seen(uid)
+    days_in_game = max(1, (int(time.time()) - first_seen) // 86400 + 1) if first_seen else 0
+
+    lines = [
+        f"👤 <b>{html.escape(name)}</b>",
+        f"🔹 {html.escape(username)}",
+        title_line.rstrip(),
+        "",
+        f"🎂 Возраст: <b>{age}</b>",
+        f"🌆 Город: <b>{html.escape(city)}</b>",
+        f"📝 {html.escape(bio)}",
+        "",
+        f"⭐ Карма: <b>{karma}</b>",
+        f"💬 Сообщений: <b>{messages}</b>",
+        f"🎲 Очки кубов: <b>{dice}</b>",
+        f"🏆 Очки сезона: <b>{database.get_season_points(chat_id, uid) if chat_id else 0}</b>",
+        "",
+        f"💎 Сапы: <b>{sapy}</b>",
+        vip_line,
+        f"👥 Рефералов: <b>{refs}</b>",
+    ]
+    if chat_id:
+        lines.insert(14, f"🪙 Монеты группы: <b>{database.get_coins(chat_id, uid)}</b>")
+    else:
+        lines.insert(14, "🪙 Монеты: <i>показываются в группе</i>")
+    if days_in_game:
+        lines.append(f"📅 В Sapronem: <b>{days_in_game} дн.</b>")
+    return "\n".join(x for x in lines if x != "")
+
 @dp.callback_query(F.data == "menu_profile")
 async def menu_profile(callback: types.CallbackQuery):
     profile = database.get_profile(callback.from_user.id)
@@ -349,23 +434,13 @@ async def menu_profile(callback: types.CallbackQuery):
             "Нажми кнопку <b>✨ Создать профиль</b> в сообщении /start или напиши <code>заполнить анкету</code>."
         )
     else:
-        name, age, city, bio, photo_id = profile
-        vip_badge = " 👑 VIP" if database.is_vip(callback.from_user.id) else ""
-        title = database.get_user_title(callback.from_user.id)
-        title_line = f"🏷️ {title}\n" if title else ""
-        caption = (
-            f"👤 <b>{name}</b>{vip_badge}\n"
-            f"{title_line}"
-            f"🎂 Возраст: {age}\n"
-            f"🌆 Город: {city}\n"
-            f"📝 {bio}"
-        )
+        _name, _age, _city, _bio, photo_id = profile
+        caption = build_profile_text(callback.from_user, 0)
         if photo_id:
             await callback.message.answer_photo(photo_id, caption=caption)
         else:
             await callback.message.answer(caption)
     await callback.answer()
-
 
 @dp.callback_query(F.data == "menu_help")
 async def menu_help(callback: types.CallbackQuery):
@@ -708,6 +783,7 @@ async def handle_messages(message: types.Message):
     text = message.text.lower().strip()
     chat_id, user_id = message.chat.id, message.from_user.id
     user_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
+    database.touch_activity(user_id, chat_id, count_message=(message.chat.type in ["group", "supergroup"]))
 
     if message.chat.type in ["group", "supergroup"]:
         database.log_message(chat_id, user_id, user_name)
@@ -847,39 +923,54 @@ async def handle_messages(message: types.Message):
         await message.answer(top.build_top_dice_text(chat_id))
         return
 
-    # 11. АНКЕТА
-    if text == "анкета":
+    # 11. ПРОФИЛЬ
+    if text in ["профиль", "мой профиль", "мой профайл", "анкета"]:
         is_reply = bool(message.reply_to_message)
         target = message.reply_to_message.from_user if is_reply else message.from_user
         profile = database.get_profile(target.id)
         if not profile:
-            await message.answer("❌ У данного пользователя еще нет анкеты!" if is_reply else "❌ У вас еще нет анкеты! Пропишите <code>заполнить анкету</code> в ЛС.")
+            await message.answer("❌ У данного пользователя ещё нет профиля!" if is_reply else "❌ У вас ещё нет профиля! Пропишите <code>заполнить анкету</code> в ЛС.")
             return
-        p_name, p_age, p_city, p_bio, p_photo_id = profile
-        mention = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
-        caption = f"<b>👤 Анкета {mention}:</b>\n\n<b>Имя:</b> {p_name}\n<b>Возраст:</b> {p_age}\n<b>Город:</b> {p_city}\n<b>О себе:</b> {p_bio}"
-        if p_photo_id:
+        _p_name, _p_age, _p_city, _p_bio, photo_id = profile
+        caption = build_profile_text(target, chat_id if message.chat.type != "private" else 0)
+        if photo_id:
             try:
-                await bot.send_photo(chat_id=chat_id, photo=p_photo_id, caption=caption)
+                await bot.send_photo(chat_id=chat_id, photo=photo_id, caption=caption)
             except Exception as e:
-                logger.exception(f"Ошибка отправки фото анкеты (user_id: {target.id}): {e}")
-                await message.answer(caption + "\n\n<i>(Фото временно недоступно)</i>")
+                logger.exception(f"Ошибка отправки фото профиля (user_id: {target.id}): {e}")
+                await message.answer(caption)
         else:
-            await message.answer(caption + "\n\n📸 <i>Фото не добавлено</i>")
+            await message.answer(caption)
         return
 
     # 12. SAPRONEM: глобальная валюта и VIP
     # 💎 Сапы и VIP общие для пользователя во всех группах.
-    if text in ["сапы", "сап", "баланс", "кошелек", "кошелёк"]:
+    if text in ["сапы", "сап", "баланс", "кошелек", "кошелёк", "рюкзак", "инвентарь", "мешок"]:
         database.ensure_premium_user(user_id)
         sapy = database.get_sapy(user_id)
         vip_left = database.vip_seconds_left(user_id)
         vip_status = "👑 VIP активен" if vip_left else "▫️ VIP не активен"
+        group_lines = ""
+        if message.chat.type != "private":
+            coins = database.get_coins(chat_id, user_id)
+            season_points = database.get_season_points(chat_id, user_id)
+            group_lines = (
+                f"🪙 Монеты группы: <b>{coins}</b>\n"
+                f"🏆 Очки сезона: <b>{season_points}</b>\n"
+            )
+        else:
+            group_lines = "🪙 Монеты: <i>зависят от группы</i>\n"
+        vip_full = (
+            f"👑 VIP: <b>активен</b> — {vip_left // 86400} дн. {(vip_left % 86400) // 3600} ч. осталось"
+            if vip_left else "👑 VIP: <b>нет</b>"
+        )
         await message.answer(
-            f"💎 <b>Баланс Sapronem</b>\n\n"
-            f"Сапы: <b>{sapy} 💎</b>\n"
-            f"{vip_status}\n\n"
-            "Команда VIP: <code>вип</code>"
+            "🎒 <b>Рюкзак Sapronem</b>\n\n"
+            f"💎 Сапы: <b>{sapy}</b>\n"
+            f"{group_lines}"
+            f"{vip_full}\n\n"
+            "🛍️ <code>магазин</code> — предметы и VIP\n"
+            "⭐ <code>пополнить сапы</code> — Telegram Stars"
         )
         return
 
@@ -965,7 +1056,7 @@ async def handle_messages(message: types.Message):
     # верхнеуровневым "if" (не elif), иначе он может случайно перехватить
     # часть команд, написанных в группе.
     if message.chat.type in ["private"]:
-        await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота! <3 ")
+        await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота!")
         return
 
     # 13. ЕЖЕДНЕВНЫЙ БОНУС
@@ -1096,7 +1187,7 @@ async def handle_messages(message: types.Message):
                         can_add_web_page_previews=True
                     )
                 )
-                await message.answer(f"🔊 Пользователь {t_mention} был размучен!")
+                await message.answer(f"🔊 Пользователь {t_mention} размучен!")
             elif text.startswith("мут"):
                 parts = message.text.split(maxsplit=2)
                 duration_str = "5м"
@@ -1130,7 +1221,7 @@ async def handle_messages(message: types.Message):
         if target.id == user_id:
             await message.answer("Нельзя изменять карму самому себе! ❌")
             return
-        change = 1 if text in ["+", "плюс", "спасибо", "красава"] else -1
+        change = 1 if text in ["+", "плюс", "спасибо"] else -1
         new_val = database.update_karma(chat_id, target.id, change)
         await message.answer(f"📊 Карма пользователя {target.full_name} изменена!\nТекущая карма: <b>{new_val}</b>")
         return

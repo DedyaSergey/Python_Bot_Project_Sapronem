@@ -131,6 +131,15 @@ def init_db():
     """)
 
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_activity (
+        user_id INTEGER PRIMARY KEY,
+        last_seen INTEGER NOT NULL,
+        last_chat_id INTEGER DEFAULT 0,
+        message_count INTEGER DEFAULT 0
+    )
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS daily_quests (
         chat_id INTEGER,
         user_id INTEGER,
@@ -368,6 +377,18 @@ def reset_warns(chat_id, user_id):
     cursor.execute("UPDATE reputation SET warns = 0 WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
     conn.commit()
 
+def touch_activity(user_id, chat_id=0, count_message=False):
+    now = int(time.time())
+    cursor.execute("""
+    INSERT INTO user_activity (user_id, last_seen, last_chat_id, message_count)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+        last_seen = excluded.last_seen,
+        last_chat_id = excluded.last_chat_id,
+        message_count = user_activity.message_count + excluded.message_count
+    """, (user_id, now, chat_id, 1 if count_message else 0))
+    conn.commit()
+
 def log_message(chat_id, user_id, user_name):
     cursor.execute("""
     INSERT INTO reputation (chat_id, user_id, user_name, messages_all) 
@@ -422,6 +443,23 @@ def update_dice(chat_id, user_id, user_name, score):
         user_name = ?
     """, (chat_id, user_id, user_name, score, score, user_name))
     conn.commit()
+
+
+
+def get_user_messages(chat_id, user_id):
+    cursor.execute("SELECT messages_all FROM reputation WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+def get_user_dice_score(chat_id, user_id):
+    cursor.execute("SELECT dice_score FROM reputation WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    row = cursor.fetchone()
+    return row[0] if row else 0
+
+def get_first_seen(user_id):
+    cursor.execute("SELECT first_seen FROM user_meta WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else 0
 
 def get_top_dice(chat_id, limit=10):
     cursor.execute("""
@@ -752,14 +790,27 @@ init_shop_db()
 
 # --- АДМИН-ЦЕНТР SAPRONEM ---
 def admin_stats():
+    now = int(time.time())
     stats = {}
     cursor.execute("SELECT COUNT(*) FROM user_meta")
     stats["users"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM profiles")
+    stats["profiles"] = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM reputation WHERE chat_id < 0")
     stats["groups"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM reputation")
+    stats["memberships"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(messages_all), 0) FROM reputation")
+    stats["messages"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_activity WHERE last_seen >= ?", (now - 86400,))
+    stats["active_24h"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_activity WHERE last_seen >= ?", (now - 7 * 86400,))
+    stats["active_7d"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM user_activity WHERE last_seen > 0")
+    stats["tracked"] = cursor.fetchone()[0]
     cursor.execute("SELECT COUNT(*) FROM premium_wallet")
     stats["wallets"] = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM premium_wallet WHERE vip_until > ?", (int(time.time()),))
+    cursor.execute("SELECT COUNT(*) FROM premium_wallet WHERE vip_until > ?", (now,))
     stats["vip"] = cursor.fetchone()[0]
     cursor.execute("SELECT COALESCE(SUM(sapy), 0) FROM premium_wallet")
     stats["sapy"] = cursor.fetchone()[0]
@@ -767,7 +818,34 @@ def admin_stats():
     stats["payments"] = cursor.fetchone()[0]
     cursor.execute("SELECT COALESCE(SUM(stars), 0) FROM star_payments")
     stats["stars"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM user_meta WHERE referred_by IS NOT NULL")
+    stats["referred_users"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(messages_all), 0) FROM reputation WHERE chat_id < 0 AND messages_all > 0")
+    stats["group_messages"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM daily_quests WHERE claimed = 1 AND day_key = ?", (current_day_key(),))
+    stats["quests_today"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM farms WHERE crop IS NOT NULL")
+    stats["planted"] = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM season_points WHERE season_id = ?", (current_season_id(),))
+    stats["season_players"] = cursor.fetchone()[0]
     return stats
+
+def admin_top_referrers(limit=10):
+    cursor.execute("""
+        SELECT u.user_id, COUNT(r.user_id) AS refs
+        FROM user_meta u
+        JOIN user_meta r ON r.referred_by = u.user_id
+        GROUP BY u.user_id
+        ORDER BY refs DESC, u.user_id ASC LIMIT ?
+    """, (limit,))
+    return cursor.fetchall()
+
+def admin_recent_activity(limit=10):
+    cursor.execute("""
+        SELECT user_id, last_seen, message_count FROM user_activity
+        ORDER BY last_seen DESC LIMIT ?
+    """, (limit,))
+    return cursor.fetchall()
 
 def admin_user(user_id):
     ensure_premium_user(user_id)
