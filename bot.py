@@ -4,7 +4,8 @@ import random
 import logging
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import os
@@ -32,15 +33,189 @@ class ProfileForm(StatesGroup):
     SET_BIO = State()
     SET_PHOTO = State()
 
-@dp.message(Command("start"), F.chat.type == "private")
-async def cmd_start_private(message: types.Message):
+def private_menu(profile_exists=False):
+    profile_button = "👤 Мой профиль" if profile_exists else "✨ Создать профиль"
+    profile_callback = "menu_profile" if profile_exists else "create_profile"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=profile_button, callback_data=profile_callback),
+         InlineKeyboardButton(text="🎮 Как играть", callback_data="menu_help")],
+        [InlineKeyboardButton(text="🎁 Пригласить друзей", callback_data="menu_ref")],
+        [InlineKeyboardButton(text="➕ Добавить в группу", url="https://t.me/Sapronem_Bot?startgroup=true")],
+    ])
+
+
+def group_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌱 Ферма", callback_data="group_farm"),
+         InlineKeyboardButton(text="🎁 Бонус", callback_data="group_bonus")],
+        [InlineKeyboardButton(text="🏆 Топ", callback_data="group_top"),
+         InlineKeyboardButton(text="❓ Команды", callback_data="group_help")],
+    ])
+
+
+@dp.message(CommandStart(), F.chat.type == "private")
+async def cmd_start_private(message: types.Message, state: FSMContext, command: CommandStart):
+    await state.clear()
+    referred_by = None
+    args = (command.args or "").strip()
+    if args.startswith("ref_"):
+        try:
+            referred_by = int(args[4:])
+        except ValueError:
+            referred_by = None
+
+    saved_referrer = database.register_user(message.from_user.id, referred_by)
     mention = f'<a href="tg://user?id={message.from_user.id}">{message.from_user.full_name}</a>'
-    await message.answer(
-        f"👋 Привет, {mention}!\n\n"
-        f"📝 Напишите <code>заполнить анкету</code>, чтобы создать свой профиль.\n"
-        f"👤 Напишите <code>анкета</code>, чтобы посмотреть её.\n\n"
-        f"В группах я считаю топ сообщений, репутацию и считываю РП команды!"
+    profile_exists = database.get_profile(message.from_user.id) is not None
+    profile_line = "✅ Профиль уже создан." if profile_exists else "👤 Создай профиль — это займёт пару минут."
+
+    text = (
+        f"👋 <b>Добро пожаловать в Sapronem, {mention}!</b>\n\n"
+        "🎮 <b>Игровой бот для Telegram-групп.</b>\n\n"
+        "Здесь можно: \n"
+        "⭐ прокачивать репутацию\n"
+        "🏆 попадать в топ участников\n"
+        "💍 создавать игровые отношения\n"
+        "🎲 играть в кубы\n"
+        "🌱 развивать свою ферму\n"
+        "💬 использовать RP-команды\n\n"
+        f"{profile_line}\n\n"
+        "Добавь меня в свою группу — и начнём 🚀"
     )
+    if saved_referrer and saved_referrer != message.from_user.id:
+        text += "\n\n🎉 Ты пришёл по приглашению друга!"
+    await message.answer(text, reply_markup=private_menu(profile_exists))
+
+
+@dp.callback_query(F.data == "create_profile")
+async def create_profile_callback(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("📝 <b>Создаём профиль!</b>\n\nНапиши своё имя:")
+    await state.set_state(ProfileForm.SET_NAME)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_profile")
+async def menu_profile(callback: types.CallbackQuery):
+    profile = database.get_profile(callback.from_user.id)
+    if not profile:
+        await callback.message.answer(
+            "👤 <b>Профиль ещё не создан.</b>\n\n"
+            "Нажми кнопку <b>✨ Создать профиль</b> в сообщении /start или напиши <code>заполнить анкету</code>."
+        )
+    else:
+        name, age, city, bio, photo_id = profile
+        caption = (
+            f"👤 <b>{name}</b>\n"
+            f"🎂 Возраст: {age}\n"
+            f"🌆 Город: {city}\n"
+            f"📝 {bio}"
+        )
+        if photo_id:
+            await callback.message.answer_photo(photo_id, caption=caption)
+        else:
+            await callback.message.answer(caption)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_help")
+async def menu_help(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "🎮 <b>Как играть в Sapronem</b>\n\n"
+        "1️⃣ Создай профиль.\n"
+        "2️⃣ Добавь бота в Telegram-группу.\n"
+        "3️⃣ Общайся — бот считает сообщения и репутацию.\n"
+        "4️⃣ Играй в кубы, используй RP-команды и создавай отношения.\n"
+        "5️⃣ Открой <b>ферму</b>, получай 🪙 монеты и выращивай культуры.\n\n"
+        "💡 Чем активнее ваше сообщество, тем интереснее игра."
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu_ref")
+async def menu_ref(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    database.register_user(user_id)
+    count = database.get_referral_count(user_id)
+    link = f"https://t.me/Sapronem_Bot?start=ref_{user_id}"
+    reward_text = "🎁 После 3 приглашённых друзей получишь +500 🪙 в группе, где заберёшь награду."
+    await callback.message.answer(
+        f"👥 <b>Приглашай друзей в Sapronem</b>\n\n"
+        f"Твоих приглашений: <b>{count}</b>/3\n\n"
+        f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n{reward_text}"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "group_farm")
+async def group_farm_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("Ферма работает в группах", show_alert=True)
+        return
+    database.ensure_economy_user(callback.message.chat.id, callback.from_user.id)
+    await callback.message.answer(farm.build_farm_text(callback.message.chat.id, callback.from_user.id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "group_bonus")
+async def group_bonus_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("Бонус работает в группах", show_alert=True)
+        return
+    await send_daily_bonus(callback.message, callback.from_user)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "group_top")
+async def group_top_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("Топ работает в группах", show_alert=True)
+        return
+    await callback.message.answer(top.build_top_messages_text(callback.message.chat.id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "group_help")
+async def group_help_callback(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "📚 <b>Основные команды Sapronem</b>\n\n"
+        "🌱 <code>ферма</code> — твоя ферма\n"
+        "🎁 <code>бонус</code> — ежедневные монеты\n"
+        "🏆 <code>топ весь</code> — топ сообщений\n"
+        "🎲 <code>кубы</code> / <code>топ кубы</code>\n"
+        "👤 <code>анкета</code> — твой профиль (или ответом на сообщение)\n"
+        "⭐ <code>карма</code> — репутация\n"
+        "💍 <code>брак</code> — предложить брак ответом на сообщение\n"
+        "🎭 RP-команды — ответом на сообщение."
+    )
+    await callback.answer()
+
+async def send_daily_bonus(message: types.Message, user: types.User):
+    chat_id = message.chat.id
+    user_id = user.id
+    first = database.ensure_economy_user(chat_id, user_id)
+    claimed, seconds_left = database.claim_daily_bonus(chat_id, user_id, amount=100)
+
+    extra = ""
+    if database.get_referral_count(user_id) >= 3 and not database.get_referral_reward_claimed(user_id):
+        database.add_coins(chat_id, user_id, 500)
+        database.claim_referral_reward(user_id)
+        extra = "\n👥 За 3 приглашённых друзей: <b>+500 🪙</b>"
+
+    if first:
+        await message.answer("🎉 <b>Стартовый бонус: +100 🪙</b>\n\nТеперь можно открыть <code>ферма</code> и посадить первую культуру!")
+        if claimed:
+            await message.answer("🎁 <b>Ежедневный бонус: +100 🪙</b>" + extra)
+        return
+
+    if claimed:
+        await message.answer("🎁 <b>Ежедневный бонус: +100 🪙</b>" + extra)
+        return
+
+    hours = seconds_left // 3600
+    minutes = (seconds_left % 3600) // 60
+    await message.answer(f"⏳ Бонус уже получен. Следующий будет через <b>{hours} ч {minutes} мин</b>.")
+
 
 @dp.message(F.text.lower().strip().in_(["пинг", "ping", "/ping"]))
 async def cmd_ping(message: types.Message):
@@ -53,9 +228,18 @@ async def cmd_ping(message: types.Message):
 async def welcome_new_member(message: types.Message):
     for member in message.new_chat_members:
         if member.id == bot.id:
+            await message.answer(
+                "🚀 <b>Sapronem подключён!</b>\n\n"
+                "Теперь в этой группе доступны рейтинг активности, репутация, ферма, кубы, RP-команды, браки и модерация.\n\n"
+                "🌱 Напиши <code>ферма</code>\n"
+                "🏆 <code>топ весь</code>\n"
+                "🎁 <code>бонус</code>\n"
+                "❓ Или нажми кнопку ниже.",
+                reply_markup=group_menu(),
+            )
             continue
         user_mention = f'<a href="tg://user?id={member.id}">{member.full_name}</a>'
-        await message.answer(f"Добро пожаловать! {user_mention} 🚀")
+        await message.answer(f"👋 Добро пожаловать, {user_mention}! 🚀")
 
 @dp.message(F.text.lower().strip() == "заполнить анкету")
 async def start_profile_form(message: types.Message, state: FSMContext):
@@ -73,7 +257,11 @@ async def process_age(message: types.Message, state: FSMContext):
     if not message.text.isdigit():
         await message.answer("❌ Введите возраст только цифрами!")
         return
-    await state.update_data(age=int(message.text))
+    age = int(message.text)
+    if age < 1 or age > 120:
+        await message.answer("❌ Укажи реальный возраст от 1 до 120.")
+        return
+    await state.update_data(age=age)
     await message.answer("🌆 Ваш город? (Или напишите <code>0</code> для пропуска):")
     await state.set_state(ProfileForm.SET_CITY)
 
@@ -86,8 +274,11 @@ async def process_city(message: types.Message, state: FSMContext):
 
 @dp.message(ProfileForm.SET_BIO)
 async def process_bio(message: types.Message, state: FSMContext):
-    await state.update_data(bio=message.text)
-    await message.answer("📸 Отправьте одно фото для анкеты:")
+    bio = message.text.strip()
+    if bio == "0":
+        bio = "Не указано"
+    await state.update_data(bio=bio)
+    await message.answer("📸 Отправьте одно фото для анкеты или напишите <code>пропустить</code>:")
     await state.set_state(ProfileForm.SET_PHOTO)
 
 @dp.message(ProfileForm.SET_PHOTO, F.photo)
@@ -99,8 +290,14 @@ async def process_photo(message: types.Message, state: FSMContext):
     await message.answer("🎉 Анкета сохранена! Напишите слово <code>анкета</code>.")
 
 @dp.message(ProfileForm.SET_PHOTO)
-async def process_photo_invalid(message: types.Message):
-    await message.answer("❌ Пожалуйста, отправь именно фото:")
+async def process_photo_invalid(message: types.Message, state: FSMContext):
+    if message.text and message.text.lower().strip() in ["пропустить", "0"]:
+        user_data = await state.get_data()
+        database.save_profile(message.from_user.id, user_data['name'], user_data['age'], user_data['city'], user_data['bio'], None)
+        await state.clear()
+        await message.answer("🎉 <b>Профиль создан!</b>\n\nФото можно добавить позже, обновив анкету.")
+        return
+    await message.answer("❌ Пожалуйста, отправь фото или напиши <code>пропустить</code>:")
 
 @dp.message(F.text)
 async def handle_messages(message: types.Message):
@@ -250,11 +447,14 @@ async def handle_messages(message: types.Message):
         p_name, p_age, p_city, p_bio, p_photo_id = profile
         mention = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
         caption = f"<b>👤 Анкета {mention}:</b>\n\n<b>Имя:</b> {p_name}\n<b>Возраст:</b> {p_age}\n<b>Город:</b> {p_city}\n<b>О себе:</b> {p_bio}"
-        try:
-            await bot.send_photo(chat_id=chat_id, photo=p_photo_id, caption=caption)
-        except Exception as e:
-            logger.exception(f"Ошибка отправки фото анкеты (user_id: {target.id}): {e}")
-            await message.answer(caption + "\n\n<i>(Ошибка фото)</i>")
+        if p_photo_id:
+            try:
+                await bot.send_photo(chat_id=chat_id, photo=p_photo_id, caption=caption)
+            except Exception as e:
+                logger.exception(f"Ошибка отправки фото анкеты (user_id: {target.id}): {e}")
+                await message.answer(caption + "\n\n<i>(Фото временно недоступно)</i>")
+        else:
+            await message.answer(caption + "\n\n📸 <i>Фото не добавлено</i>")
         return
 
     # 12. ОГРАНИЧЕНИЕ ЛС
@@ -266,6 +466,11 @@ async def handle_messages(message: types.Message):
         await message.answer("🤖 В ЛС пока ограниченный выбор команд. Есть только команды ПИНГ и Заполнить анкету. Добавьте меня в группу для полного функционала бота!")
         return
 
+    # 13. ЕЖЕДНЕВНЫЙ БОНУС
+    if text in ["бонус", "ежедневный бонус", "дейлик"]:
+        await send_daily_bonus(message, message.from_user)
+        return
+
     # 13. ТОП ВСЕХ (СООБЩЕНИЯ)
     if text in ["топ весь", "топ вся", "топ соо", "топ сообщений"]:
         await message.answer(top.build_top_messages_text(chat_id))
@@ -273,11 +478,19 @@ async def handle_messages(message: types.Message):
 
     # 14. ФЕРМА
     if text == "ферма":
-        await message.answer(farm.build_farm_text(chat_id, user_id))
+        first = database.ensure_economy_user(chat_id, user_id)
+        if first:
+            await message.answer(
+                "🎉 <b>Добро пожаловать на ферму!</b>\n\n"
+                "Тебе начислено <b>100 🪙</b> стартовых монет.\n"
+                "Посади первую культуру командой <code>посадить морковь</code>."
+            )
+        await message.answer(farm.build_farm_text(chat_id, user_id), reply_markup=group_menu())
         return
 
     # 15. ПОСАДИТЬ
     if text.startswith("посадить"):
+        database.ensure_economy_user(chat_id, user_id)
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             await message.reply(
@@ -291,6 +504,7 @@ async def handle_messages(message: types.Message):
 
     # 16. СОБРАТЬ
     if text == "собрать":
+        database.ensure_economy_user(chat_id, user_id)
         success, reply_text = farm.harvest(chat_id, user_id)
         await message.reply(reply_text)
         return

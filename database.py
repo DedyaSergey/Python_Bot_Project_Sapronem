@@ -79,6 +79,34 @@ def init_db():
     )
     """)
 
+    # Глобальные данные пользователя: рефералы и первый вход.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_meta (
+        user_id INTEGER PRIMARY KEY,
+        referred_by INTEGER,
+        first_seen INTEGER NOT NULL
+    )
+    """)
+
+    # Экономика конкретного чата: стартовый бонус и ежедневный бонус.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS economy_meta (
+        chat_id INTEGER,
+        user_id INTEGER,
+        starter_claimed INTEGER DEFAULT 0,
+        daily_bonus_at INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    )
+    """)
+
+    # Одноразовые награды за рефералы.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS referral_rewards (
+        user_id INTEGER PRIMARY KEY,
+        reward_claimed INTEGER DEFAULT 0
+    )
+    """)
+
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ТРИГГЕРОВ ---
@@ -155,7 +183,7 @@ def log_message(chat_id, user_id, user_name):
 def get_karma(chat_id, user_id):
     cursor.execute("SELECT karma FROM reputation WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
     result = cursor.fetchone()
-    return result if result else 0
+    return result[0] if result else 0
 
 def update_karma(chat_id, user_id, change):
     cursor.execute("""
@@ -221,6 +249,98 @@ def add_coins(chat_id, user_id, amount):
     """, (chat_id, user_id, amount, amount))
     conn.commit()
     return get_coins(chat_id, user_id)
+
+
+# --- ГЛОБАЛЬНЫЕ ДАННЫЕ / РЕФЕРАЛЫ ---
+def register_user(user_id, referred_by=None):
+    """Регистрирует пользователя при первом запуске и сохраняет реферера."""
+    now = int(time.time())
+    cursor.execute("SELECT referred_by FROM user_meta WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row is not None:
+        return row[0]
+
+    # Нельзя пригласить самого себя.
+    if referred_by == user_id:
+        referred_by = None
+    cursor.execute(
+        "INSERT INTO user_meta (user_id, referred_by, first_seen) VALUES (?, ?, ?)",
+        (user_id, referred_by, now),
+    )
+    conn.commit()
+    return referred_by
+
+
+def get_referral_count(user_id):
+    cursor.execute("SELECT COUNT(*) FROM user_meta WHERE referred_by = ?", (user_id,))
+    return cursor.fetchone()[0]
+
+
+def get_referral_inviter(user_id):
+    cursor.execute("SELECT referred_by FROM user_meta WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def get_referral_reward_claimed(user_id):
+    cursor.execute("SELECT reward_claimed FROM referral_rewards WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    return bool(row[0]) if row else False
+
+
+def claim_referral_reward(user_id):
+    cursor.execute("""
+    INSERT INTO referral_rewards (user_id, reward_claimed) VALUES (?, 1)
+    ON CONFLICT(user_id) DO UPDATE SET reward_claimed = 1
+    """, (user_id,))
+    conn.commit()
+
+
+def ensure_economy_user(chat_id, user_id):
+    """Возвращает True, если пользователю только что выдан стартовый бонус."""
+    cursor.execute(
+        "SELECT starter_claimed FROM economy_meta WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    )
+    row = cursor.fetchone()
+    if row is not None:
+        return False
+    cursor.execute(
+        "INSERT INTO economy_meta (chat_id, user_id, starter_claimed, daily_bonus_at) VALUES (?, ?, 1, 0)",
+        (chat_id, user_id),
+    )
+    conn.commit()
+    add_coins(chat_id, user_id, 100)
+    return True
+
+
+def claim_daily_bonus(chat_id, user_id, amount=100, cooldown=86400):
+    """Возвращает (claimed, seconds_left)."""
+    now = int(time.time())
+    ensure_economy_user(chat_id, user_id)
+    cursor.execute(
+        "SELECT daily_bonus_at FROM economy_meta WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    )
+    row = cursor.fetchone()
+    last = row[0] if row else 0
+    if last and now - last < cooldown:
+        return False, cooldown - (now - last)
+    cursor.execute(
+        "UPDATE economy_meta SET daily_bonus_at = ? WHERE chat_id = ? AND user_id = ?",
+        (now, chat_id, user_id),
+    )
+    conn.commit()
+    add_coins(chat_id, user_id, amount)
+    return True, 0
+
+
+def get_economy_status(chat_id, user_id):
+    cursor.execute(
+        "SELECT starter_claimed, daily_bonus_at FROM economy_meta WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    )
+    return cursor.fetchone() or (0, 0)
 
 
 # --- ФУНКЦИИ ДЛЯ ФЕРМЫ ---
