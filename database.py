@@ -1,7 +1,20 @@
 import sqlite3
 import time
+import os
 
-conn = sqlite3.connect("")
+# Путь к файлу базы. По умолчанию — "bot.db" рядом с кодом (подходит для
+# локального запуска). На Railway ОБЯЗАТЕЛЬНО подключи Volume (постоянный
+# диск) и укажи путь к нему через переменную окружения DB_PATH, иначе при
+# каждом редеплое/рестарте контейнера база будет создаваться с нуля и вся
+# карма/монеты/ферма обнулятся.
+#
+# Как настроить на Railway:
+#   1. В проекте сервиса открой вкладку "Volumes" -> "New Volume".
+#   2. Укажи Mount Path, например: /data
+#   3. Во вкладке "Variables" добавь: DB_PATH = /data/bot.db
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
 def init_db():

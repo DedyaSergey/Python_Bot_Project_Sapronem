@@ -1,6 +1,7 @@
 import asyncio
 import time
 import random
+import logging
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
@@ -12,6 +13,10 @@ import rp
 import rights
 import farm
 import top
+
+# Логи ошибок будут видны во вкладке "Deployments -> Logs" на Railway.
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("bot")
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -245,8 +250,11 @@ async def handle_messages(message: types.Message):
         p_name, p_age, p_city, p_bio, p_photo_id = profile
         mention = f'<a href="tg://user?id={target.id}">{target.full_name}</a>'
         caption = f"<b>👤 Анкета {mention}:</b>\n\n<b>Имя:</b> {p_name}\n<b>Возраст:</b> {p_age}\n<b>Город:</b> {p_city}\n<b>О себе:</b> {p_bio}"
-        try: await bot.send_photo(chat_id=chat_id, photo=p_photo_id, caption=caption)
-        except Exception: await message.answer(caption + "\n\n<i>(Ошибка фото)</i>")
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=p_photo_id, caption=caption)
+        except Exception as e:
+            logger.exception(f"Ошибка отправки фото анкеты (user_id: {target.id}): {e}")
+            await message.answer(caption + "\n\n<i>(Ошибка фото)</i>")
         return
 
     # 12. ОГРАНИЧЕНИЕ ЛС
@@ -360,7 +368,8 @@ async def handle_messages(message: types.Message):
                 reply_msg = f"🔇 Пользователь {t_mention} замучен на <b>{duration_str}</b>."
                 if reason: reply_msg += f"\n📄 Причина: {reason}"
                 await message.answer(reply_msg)
-        except Exception:
+        except Exception as e:
+            logger.exception(f"Ошибка модерации (команда: {text!r}, chat_id: {chat_id}): {e}")
             await message.answer(f"❌ Ошибка. Проверьте права админа у бота.")
         return
 
