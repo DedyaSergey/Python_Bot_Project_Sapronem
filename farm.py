@@ -77,7 +77,7 @@ def plant(chat_id: int, user_id: int, crop: str):
     )
 
 
-def harvest(chat_id: int, user_id: int):
+def harvest(chat_id: int, user_id: int, reward_multiplier: float = 1.0):
     """Возвращает (собрал_ли_что-то: bool, текст ответа: str)"""
     plots = db.get_farm(chat_id, user_id)
     collected = []
@@ -91,8 +91,9 @@ def harvest(chat_id: int, user_id: int):
         if info is None:
             continue
         if now - planted_at >= info["time"]:
-            total_reward += info["reward"]
-            collected.append(f"{info['emoji']} {crop} (+{info['reward']}🪙)")
+            reward = int(info["reward"] * reward_multiplier)
+            total_reward += reward
+            collected.append(f"{info['emoji']} {crop} (+{reward}🪙)")
             db.clear_plot(chat_id, user_id, plot_number)
 
     if not collected:

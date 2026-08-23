@@ -130,6 +130,166 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS daily_quests (
+        chat_id INTEGER,
+        user_id INTEGER,
+        day_key TEXT,
+        quest_type TEXT,
+        progress INTEGER DEFAULT 0,
+        claimed INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id, day_key)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS season_points (
+        season_id TEXT,
+        chat_id INTEGER,
+        user_id INTEGER,
+        points INTEGER DEFAULT 0,
+        PRIMARY KEY (season_id, chat_id, user_id)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS season_rewards (
+        season_id TEXT,
+        chat_id INTEGER,
+        user_id INTEGER,
+        place INTEGER,
+        claimed INTEGER DEFAULT 0,
+        PRIMARY KEY (season_id, chat_id, user_id)
+    )
+    """)
+    conn.commit()
+
+# --- ФУНКЦИИ ДЛЯ ЕЖЕДНЕВНЫХ ЗАДАНИЙ, СЕЗОНОВ И СОБЫТИЙ ---
+def current_day_key():
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+def current_season_id():
+    return time.strftime("%G-W%V", time.localtime())
+
+def previous_season_id():
+    now = int(time.time()) - 7 * 86400
+    return time.strftime("%G-W%V", time.localtime(now))
+
+def current_event():
+    week = int(time.strftime("%W", time.localtime()))
+    events = [
+        ("harvest", "🌾 Урожайная неделя", "Сбор урожая приносит на 25% больше 🪙."),
+        ("social", "💬 Социальная неделя", "Сообщения дают в 2 раза больше очков сезона."),
+        ("bonus", "🎁 Щедрая неделя", "Ежедневный бонус увеличен на 50 🪙."),
+    ]
+    return events[week % len(events)]
+
+def _quest_for_day(day_key=None):
+    day_key = day_key or current_day_key()
+    seed = sum(ord(c) for c in day_key)
+    quests = [
+        ("messages", 20, "💬 Напиши 20 сообщений в группе"),
+        ("dice", 3, "🎲 Сыграй в кубы 3 раза"),
+        ("harvest", 1, "🌾 Собери урожай хотя бы 1 раз"),
+        ("bonus", 1, "🎁 Забери ежедневный бонус"),
+    ]
+    return quests[seed % len(quests)]
+
+def get_daily_quest(chat_id, user_id):
+    day = current_day_key()
+    qtype, target, title = _quest_for_day(day)
+    cursor.execute("SELECT progress, claimed FROM daily_quests WHERE chat_id=? AND user_id=? AND day_key=?", (chat_id, user_id, day))
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute("INSERT INTO daily_quests(chat_id,user_id,day_key,quest_type,progress,claimed) VALUES(?,?,?,?,0,0)", (chat_id,user_id,day,qtype))
+        conn.commit()
+        progress, claimed = 0, 0
+    else:
+        progress, claimed = row
+    return {"type": qtype, "target": target, "title": title, "progress": min(progress, target), "claimed": bool(claimed), "day": day}
+
+def progress_daily_quest(chat_id, user_id, quest_type, amount=1):
+    q = get_daily_quest(chat_id, user_id)
+    if q["type"] != quest_type or q["claimed"]:
+        return q, False
+    new_progress = min(q["target"], q["progress"] + amount)
+    cursor.execute("UPDATE daily_quests SET progress=? WHERE chat_id=? AND user_id=? AND day_key=?", (new_progress,chat_id,user_id,q["day"]))
+    conn.commit()
+    q["progress"] = new_progress
+    completed = new_progress >= q["target"]
+    return q, completed
+
+def claim_daily_quest(chat_id, user_id):
+    q = get_daily_quest(chat_id, user_id)
+    if q["claimed"]:
+        return False, q, get_coins(chat_id,user_id), get_sapy(user_id)
+    if q["progress"] < q["target"]:
+        return False, q, get_coins(chat_id,user_id), get_sapy(user_id)
+    cursor.execute("UPDATE daily_quests SET claimed=1 WHERE chat_id=? AND user_id=? AND day_key=?", (chat_id,user_id,q["day"]))
+    conn.commit()
+    coins = add_coins(chat_id,user_id,50)
+    sapy = add_sapy(user_id,5)
+    return True, q, coins, sapy
+
+def add_season_points(chat_id, user_id, points):
+    season = current_season_id()
+    cursor.execute("""INSERT INTO season_points(season_id,chat_id,user_id,points) VALUES(?,?,?,?)
+    ON CONFLICT(season_id,chat_id,user_id) DO UPDATE SET points=points+excluded.points""", (season,chat_id,user_id,points))
+    conn.commit()
+    return get_season_points(chat_id,user_id)
+
+def get_season_points(chat_id,user_id,season_id=None):
+    season_id = season_id or current_season_id()
+    cursor.execute("SELECT points FROM season_points WHERE season_id=? AND chat_id=? AND user_id=?", (season_id,chat_id,user_id))
+    row=cursor.fetchone()
+    return row[0] if row else 0
+
+def get_season_top(chat_id, season_id=None, limit=10):
+    season_id = season_id or current_season_id()
+    cursor.execute("""SELECT user_id, points FROM season_points WHERE season_id=? AND chat_id=? ORDER BY points DESC LIMIT ?""", (season_id,chat_id,limit))
+    return cursor.fetchall()
+
+def claim_previous_season_rewards(chat_id, user_id):
+    season = previous_season_id()
+    top = get_season_top(chat_id, season, 50)
+    place = next((i+1 for i,(uid,_) in enumerate(top) if uid == user_id), None)
+    if not place:
+        return False, None, 0, get_sapy(user_id)
+    cursor.execute("SELECT claimed FROM season_rewards WHERE season_id=? AND chat_id=? AND user_id=?", (season,chat_id,user_id))
+    row=cursor.fetchone()
+    if row and row[0]:
+        return False, place, 0, get_sapy(user_id)
+
+    rewards = {
+        1:(1000,100), 2:(750,75), 3:(500,50),
+        4:(350,35), 5:(350,35),
+        6:(250,25), 7:(250,25), 8:(250,25), 9:(250,25), 10:(250,25),
+        **{i:(175,15) for i in range(11,21)},
+        **{i:(125,10) for i in range(21,31)},
+        **{i:(75,7) for i in range(31,41)},
+        **{i:(50,5) for i in range(41,51)},
+    }
+    coins, sapy = rewards[place]
+    cursor.execute("INSERT OR REPLACE INTO season_rewards(season_id,chat_id,user_id,place,claimed) VALUES(?,?,?,?,1)", (season,chat_id,user_id,place))
+
+    # Памятное достижение для топ-3. Не заменяет обычный купленный титул.
+    season_title = None
+    if place == 1:
+        season_title = f"🏆 Чемпион сезона {season}"
+    elif place == 2:
+        season_title = f"🥈 Серебряный призёр {season}"
+    elif place == 3:
+        season_title = f"🥉 Бронзовый призёр {season}"
+    if season_title:
+        cursor.execute("INSERT OR REPLACE INTO season_achievements(season_id,chat_id,user_id,place,title) VALUES(?,?,?,?,?)", (season,chat_id,user_id,place,season_title))
+
+    conn.commit()
+    coins_total=add_coins(chat_id,user_id,coins)
+    sapy_total=add_sapy(user_id,sapy)
+    return True, place, coins, sapy_total
+
+def get_season_achievements(user_id):
+    cursor.execute("SELECT season_id, place, title FROM season_achievements WHERE user_id=? ORDER BY season_id DESC", (user_id,))
+    return cursor.fetchall()
+
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ТРИГГЕРОВ ---

@@ -92,10 +92,10 @@ def private_menu(profile_exists=False):
 
 def group_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌱 Ферма", callback_data="group_farm"),
-         InlineKeyboardButton(text="🎁 Бонус", callback_data="group_bonus")],
-        [InlineKeyboardButton(text="🏆 Топ", callback_data="group_top"),
-         InlineKeyboardButton(text="❓ Команды", callback_data="group_help")],
+        [InlineKeyboardButton(text="🌱 Ферма", callback_data="group_farm"), InlineKeyboardButton(text="🎁 Бонус", callback_data="group_bonus")],
+        [InlineKeyboardButton(text="🏆 Топ", callback_data="group_top"), InlineKeyboardButton(text="📜 Задание", callback_data="group_quest")],
+        [InlineKeyboardButton(text="👑 Сезон", callback_data="group_season"), InlineKeyboardButton(text="🎉 Событие", callback_data="group_event")],
+        [InlineKeyboardButton(text="❓ Команды", callback_data="group_help")],
     ])
 
 
@@ -490,6 +490,26 @@ async def group_top_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "group_quest")
+async def group_quest_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("Задания работают в группах", show_alert=True); return
+    await callback.message.answer(build_daily_quest_text(callback.message.chat.id, callback.from_user.id))
+    await callback.answer()
+
+@dp.callback_query(F.data == "group_season")
+async def group_season_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type not in ["group", "supergroup"]:
+        await callback.answer("Сезоны работают в группах", show_alert=True); return
+    await callback.message.answer(build_season_text(callback.message.chat.id, callback.from_user.id))
+    await callback.answer()
+
+@dp.callback_query(F.data == "group_event")
+async def group_event_callback(callback: types.CallbackQuery):
+    event_id, title, desc = database.current_event()
+    await callback.message.answer(f"🎉 <b>{title}</b>\n\n{desc}\n\nСобытие меняется каждую неделю.")
+    await callback.answer()
+
 @dp.callback_query(F.data == "group_help")
 async def group_help_callback(callback: types.CallbackQuery):
     await callback.message.answer(
@@ -497,6 +517,9 @@ async def group_help_callback(callback: types.CallbackQuery):
         "🌱 <code>ферма</code> — твоя ферма\n"
         "🎁 <code>бонус</code> — ежедневные монеты\n"
         "🏆 <code>топ весь</code> — топ сообщений\n"
+        "📜 <code>задание</code> — ежедневное задание\n"
+        "👑 <code>сезон</code> — недельный сезон и награды\n"
+        "🎉 <code>событие</code> — текущее событие\n"
         "🎲 <code>кубы</code> / <code>топ кубы</code>\n"
         "👤 <code>анкета</code> — твой профиль (или ответом на сообщение)\n"
         "⭐ <code>карма</code> — репутация\n"
@@ -508,12 +531,50 @@ async def group_help_callback(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+def build_daily_quest_text(chat_id, user_id):
+    q = database.get_daily_quest(chat_id, user_id)
+    if q["claimed"]:
+        status = "🎁 Награда уже получена сегодня."
+    elif q["progress"] >= q["target"]:
+        status = "✅ Задание выполнено! Напиши <code>задание забрать</code>."
+    else:
+        status = f"Прогресс: <b>{q['progress']}/{q['target']}</b>"
+    return f"📜 <b>Ежедневное задание</b>\n\n{q['title']}\n{status}\n\n🎁 Награда: <b>50 🪙 + 5 💎</b>"
+
+def build_season_text(chat_id, user_id):
+    season = database.current_season_id()
+    top_rows = database.get_season_top(chat_id, season, 10)
+    lines = [f"👑 <b>Сезон {season}</b>", "", "Очки сезона получаются за активность в группе.", ""]
+    if not top_rows:
+        lines.append("Пока очков нет — стань первым!")
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, points) in enumerate(top_rows, 1):
+            medal = medals[i-1] if i <= 3 else f"{i}."
+            lines.append(f"{medal} <a href=\"tg://user?id={uid}\">Игрок</a> — <b>{points}</b> очк.")
+    my_points = database.get_season_points(chat_id, user_id)
+    claimed, place, coins, sapy = database.claim_previous_season_rewards(chat_id, user_id)
+    if claimed:
+        lines.append(f"\n🎉 Ты занял <b>{place}</b>-е место в прошлом сезоне и получил награду!")
+    lines.append(f"\nТвои очки: <b>{my_points}</b>")
+    lines.append("🏆 <b>Награды топ-50 прошлого сезона:</b>")
+    lines.append("🥇 1: 1000🪙 + 100💎 | 🥈 2: 750🪙 + 75💎 | 🥉 3: 500🪙 + 50💎")
+    lines.append("4–5: 350🪙 + 35💎 | 6–10: 250🪙 + 25💎")
+    lines.append("11–20: 175🪙 + 15💎 | 21–30: 125🪙 + 10💎")
+    lines.append("31–40: 75🪙 + 7💎 | 41–50: 50🪙 + 5💎")
+    return "\n".join(lines)
+
 async def send_daily_bonus(message: types.Message, user: types.User):
     chat_id = message.chat.id
     user_id = user.id
     first = database.ensure_economy_user(chat_id, user_id)
     daily_amount = 200 if database.is_vip(user.id) else 100
+    event_id, _, _ = database.current_event()
+    if event_id == "bonus":
+        daily_amount += 50
     claimed, seconds_left = database.claim_daily_bonus(chat_id, user_id, amount=daily_amount)
+    if claimed:
+        database.progress_daily_quest(chat_id, user_id, "bonus", 1)
 
     extra = ""
 
@@ -621,6 +682,10 @@ async def handle_messages(message: types.Message):
 
     if message.chat.type in ["group", "supergroup"]:
         database.log_message(chat_id, user_id, user_name)
+        event_id, _, _ = database.current_event()
+        season_gain = 2 if event_id == "social" else 1
+        database.add_season_points(chat_id, user_id, season_gain)
+        database.progress_daily_quest(chat_id, user_id, "messages", 1)
 
     # ВНИМАНИЕ: ниже независимые блоки "if ... return", а не одна большая
     # elif-цепочка. Раньше в середине файла был отдельный блок проверки
@@ -740,6 +805,8 @@ async def handle_messages(message: types.Message):
         score = dice_msg.dice.value
         await asyncio.sleep(2)
         database.update_dice(chat_id, user_id, user_name, score)
+        database.add_season_points(chat_id, user_id, 5)
+        database.progress_daily_quest(chat_id, user_id, "dice", 1)
         mention = f'<a href="tg://user?id={user_id}">{user_name}</a>'
         await message.reply(f"🎲 {mention}, выпало число <b>{score}</b>!\nСтатистика обновлена.")
         return
@@ -877,6 +944,30 @@ async def handle_messages(message: types.Message):
         await send_daily_bonus(message, message.from_user)
         return
 
+    if text in ["задание", "задания", "дейлик задание"]:
+        await message.answer(build_daily_quest_text(chat_id, user_id))
+        return
+
+    if text in ["задание забрать", "забрать задание"]:
+        ok, q, coins_total, sapy_total = database.claim_daily_quest(chat_id, user_id)
+        if not ok:
+            if q["claimed"]:
+                await message.answer("🎁 Награда за сегодняшнее задание уже получена.")
+            else:
+                await message.answer(f"⏳ Задание ещё не выполнено: <b>{q['progress']}/{q['target']}</b>.")
+            return
+        await message.answer(f"🎉 <b>Ежедневное задание выполнено!</b>\n\n+50 🪙\n+5 💎\n\nБаланс: <b>{sapy_total} 💎</b>")
+        return
+
+    if text in ["сезон", "сезоны", "рейтинг сезона"]:
+        await message.answer(build_season_text(chat_id, user_id))
+        return
+
+    if text in ["событие", "ивент"]:
+        event_id, title, desc = database.current_event()
+        await message.answer(f"🎉 <b>{title}</b>\n\n{desc}\n\nСобытие меняется каждую неделю.")
+        return
+
     # 13. ТОП ВСЕХ (СООБЩЕНИЯ)
     if text in ["топ весь", "топ вся", "топ соо", "топ сообщений"]:
         await message.answer(top.build_top_messages_text(chat_id))
@@ -911,7 +1002,12 @@ async def handle_messages(message: types.Message):
     # 16. СОБРАТЬ
     if text == "собрать":
         database.ensure_economy_user(chat_id, user_id)
-        success, reply_text = farm.harvest(chat_id, user_id)
+        event_id, _, _ = database.current_event()
+        multiplier = 1.25 if event_id == "harvest" else 1.0
+        success, reply_text = farm.harvest(chat_id, user_id, reward_multiplier=multiplier)
+        if success:
+            database.progress_daily_quest(chat_id, user_id, "harvest", 1)
+            database.add_season_points(chat_id, user_id, 10)
         await message.reply(reply_text)
         return
 
