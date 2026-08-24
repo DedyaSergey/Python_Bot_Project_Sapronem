@@ -205,6 +205,28 @@ def init_db():
     )
     """)
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS admin_action_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER,
+        admin_id INTEGER NOT NULL,
+        action TEXT NOT NULL,
+        target_id INTEGER,
+        amount INTEGER DEFAULT 0,
+        details TEXT DEFAULT '',
+        created_at INTEGER NOT NULL
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS group_settings (
+        chat_id INTEGER PRIMARY KEY,
+        farm_enabled INTEGER DEFAULT 1,
+        quests_enabled INTEGER DEFAULT 1,
+        seasons_enabled INTEGER DEFAULT 1,
+        events_enabled INTEGER DEFAULT 1,
+        economy_enabled INTEGER DEFAULT 1
+    )
+    """)
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS global_season_points (
         season_id TEXT,
         user_id INTEGER,
@@ -1086,6 +1108,39 @@ init_shop_db()
 
 
 # --- АДМИН-ЦЕНТР SAPRONEM ---
+def log_admin_action(chat_id, admin_id, action, target_id=None, amount=0, details=""):
+    cursor.execute("INSERT INTO admin_action_log(chat_id,admin_id,action,target_id,amount,details,created_at) VALUES(?,?,?,?,?,?,?)",
+                   (chat_id, admin_id, action, target_id, int(amount or 0), details, int(time.time())))
+    conn.commit()
+
+def admin_action_log(chat_id, limit=15):
+    cursor.execute("SELECT admin_id, action, target_id, amount, details, created_at FROM admin_action_log WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit))
+    return cursor.fetchall()
+
+def get_group_settings(chat_id):
+    cursor.execute("SELECT farm_enabled,quests_enabled,seasons_enabled,events_enabled,economy_enabled FROM group_settings WHERE chat_id=?", (chat_id,))
+    row=cursor.fetchone()
+    if not row:
+        cursor.execute("INSERT OR IGNORE INTO group_settings(chat_id) VALUES(?)", (chat_id,)); conn.commit()
+        return (1,1,1,1,1)
+    return row
+
+def set_group_setting(chat_id, key, enabled):
+    allowed={"farm_enabled","quests_enabled","seasons_enabled","events_enabled","economy_enabled"}
+    if key not in allowed: return False
+    cursor.execute(f"INSERT INTO group_settings(chat_id) VALUES(?) ON CONFLICT(chat_id) DO UPDATE SET {key}=excluded.{key}", (chat_id,))
+    # The previous statement inserts default values on a missing row, so update separately for existing/missing rows.
+    cursor.execute(f"UPDATE group_settings SET {key}=? WHERE chat_id=?", (1 if enabled else 0, chat_id))
+    conn.commit(); return True
+
+def admin_group_stats(chat_id):
+    cursor.execute("SELECT COUNT(*) FROM reputation WHERE chat_id=?", (chat_id,)); members=cursor.fetchone()[0]
+    cursor.execute("SELECT COALESCE(SUM(messages_all),0) FROM reputation WHERE chat_id=?", (chat_id,)); messages=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM reputation WHERE chat_id=? AND messages_all>0", (chat_id,)); active=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM farms WHERE user_id IN (SELECT user_id FROM reputation WHERE chat_id=?) AND crop IS NOT NULL", (chat_id,)); farms=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM season_points WHERE chat_id=? AND season_id=?", (chat_id, current_season_id())); season=cursor.fetchone()[0]
+    return {"members":members,"messages":messages,"active":active,"farms":farms,"season_players":season}
+
 def admin_stats():
     now = int(time.time())
     stats = {}

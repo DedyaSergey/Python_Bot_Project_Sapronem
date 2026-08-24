@@ -81,6 +81,12 @@ DEV_IDS = load_dev_ids()
 def is_developer(user_id: int) -> bool:
     return user_id in DEV_IDS
 
+def group_feature_enabled(chat_id: int, key: str) -> bool:
+    mapping={"farm":0,"quests":1,"seasons":2,"events":3,"economy":4}
+    idx=mapping.get(key)
+    if idx is None: return True
+    return bool(database.get_group_settings(chat_id)[idx])
+
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
@@ -120,6 +126,9 @@ class AdminForm(StatesGroup):
 class DevForm(StatesGroup):
     GLOBAL_NAME = State()
     GLOBAL_REWARDS = State()
+    SAPY_ACTION = State()
+
+class GroupAdminForm(StatesGroup):
     SAPY_ACTION = State()
 
 # Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
@@ -167,6 +176,98 @@ def group_onboarding_menu():
     ])
 
 
+
+def group_admin_menu(chat_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data=f"gadmin_stats:{chat_id}"),
+         InlineKeyboardButton(text="📜 Журнал", callback_data=f"gadmin_log:{chat_id}")],
+        [InlineKeyboardButton(text="👤 Игрок", callback_data=f"gadmin_user:{chat_id}"),
+         InlineKeyboardButton(text="💎 Выдать сапы", callback_data=f"gadmin_sapy:{chat_id}")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"gadmin_settings:{chat_id}")],
+    ])
+
+def group_settings_menu(chat_id: int):
+    vals=database.get_group_settings(chat_id)
+    names=[("farm_enabled","🌱 Ферма",vals[0]),("quests_enabled","📜 Задания",vals[1]),("seasons_enabled","🏆 Сезоны",vals[2]),("events_enabled","🎉 События",vals[3]),("economy_enabled","💎 Экономика",vals[4])]
+    rows=[]
+    for key,label,val in names:
+        rows.append([InlineKeyboardButton(text=f"{label}: {'ВКЛ' if val else 'ВЫКЛ'}", callback_data=f"gset:{chat_id}:{key}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Админка", callback_data=f"gadmin_home:{chat_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+@dp.message(Command("admin"), F.chat.type.in_({"group","supergroup"}))
+async def group_admin_command(message: types.Message, state: FSMContext):
+    if not await rights.is_admin(bot, message.chat.id, message.from_user.id):
+        await message.reply("❌ Эта панель доступна только администраторам группы.")
+        return
+    await state.clear()
+    await message.reply("🛠️ <b>Админка группы</b>\n\nЗдесь только безопасные функции для управления Sapronem в этой группе.", reply_markup=group_admin_menu(message.chat.id))
+
+@dp.callback_query(F.data.startswith("gadmin_"))
+async def group_admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        action, chat_id_s=callback.data.split(":",1); chat_id=int(chat_id_s)
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True); return
+    if not await rights.is_admin(bot, chat_id, callback.from_user.id):
+        await callback.answer("❌ Вы больше не администратор этой группы.", show_alert=True); return
+    await callback.answer()
+    if action == "gadmin_home":
+        await callback.message.edit_text("🛠️ <b>Админка группы</b>\n\nВыбери действие:", reply_markup=group_admin_menu(chat_id)); return
+    if action == "gadmin_stats":
+        st=database.admin_group_stats(chat_id)
+        await callback.message.answer("📊 <b>Статистика группы</b>\n\n" f"👥 Участников Sapronem: <b>{st['members']}</b>\n" f"💬 Сообщений: <b>{st['messages']}</b>\n" f"🔥 Активных игроков: <b>{st['active']}</b>\n" f"🌱 Активных ферм: <b>{st['farms']}</b>\n" f"🏆 Игроков в сезоне: <b>{st['season_players']}</b>"); return
+    if action == "gadmin_log":
+        rows=database.admin_action_log(chat_id,15)
+        if not rows:
+            await callback.message.answer("📜 Журнал пока пуст."); return
+        lines=["📜 <b>Последние действия админов</b>",""]
+        for aid,act,target,amount,details,created in rows:
+            dt=time.strftime("%d.%m %H:%M",time.localtime(created)); t=f" → <code>{target}</code>" if target else ""; a=f" · {amount} 💎" if amount else ""
+            lines.append(f"👮 <code>{aid}</code> — {html.escape(act)}{t}{a}\n└ {html.escape(details)} · {dt}")
+        await callback.message.answer("\n".join(lines)); return
+    if action == "gadmin_user":
+        await callback.message.answer("👤 Для просмотра игрока используй <code>профиль</code> ответом на его сообщение.\n\nАдминские действия доступны через награды и выдачу сапов."); return
+    if action == "gadmin_sapy":
+        await state.set_state(GroupAdminForm.SAPY_ACTION); await state.update_data(group_chat_id=chat_id)
+        await callback.message.answer("💎 <b>Выдача сапов</b>\nОтветь на сообщение игрока и следующим сообщением напиши количество.\nЛимит: <b>300 💎/неделю на одного админа</b>.") ; return
+    if action == "gadmin_settings":
+        await callback.message.answer("⚙️ <b>Настройки группы</b>", reply_markup=group_settings_menu(chat_id)); return
+
+@dp.callback_query(F.data.startswith("gset:"))
+async def group_setting_toggle(callback: types.CallbackQuery):
+    try:
+        _,chat_id_s,key=callback.data.split(":",2); chat_id=int(chat_id_s)
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True); return
+    if not await rights.is_admin(bot, chat_id, callback.from_user.id):
+        await callback.answer("❌ Нет доступа.", show_alert=True); return
+    vals=database.get_group_settings(chat_id); mapping={"farm_enabled":0,"quests_enabled":1,"seasons_enabled":2,"events_enabled":3,"economy_enabled":4}
+    idx=mapping.get(key)
+    if idx is None: await callback.answer("Ошибка", show_alert=True); return
+    database.set_group_setting(chat_id,key,not bool(vals[idx]))
+    database.log_admin_action(chat_id,callback.from_user.id,"изменил настройку",details=key)
+    await callback.answer("Настройка изменена")
+    await callback.message.edit_reply_markup(reply_markup=group_settings_menu(chat_id))
+
+@dp.message(GroupAdminForm.SAPY_ACTION, F.chat.type.in_({"group","supergroup"}))
+async def group_admin_sapy_action(message: types.Message, state: FSMContext):
+    chat_id=message.chat.id; admin_id=message.from_user.id
+    if not await rights.is_admin(bot,chat_id,admin_id): await state.clear(); return
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        await message.reply("❌ Ответь на сообщение игрока и напиши только количество сапов."); return
+    try: amount=int((message.text or "").strip())
+    except ValueError: await message.reply("❌ Напиши только число, например <code>50</code>."); return
+    if amount<=0: await message.reply("❌ Количество должно быть больше 0."); return
+    target=message.reply_to_message.from_user
+    if target.id==admin_id: await message.reply("❌ Нельзя выдавать сапы самому себе."); return
+    remaining=database.admin_sapy_weekly_remaining(admin_id)
+    if amount>remaining: await message.reply(f"❌ Осталось <b>{remaining} 💎</b> из недельного лимита 300 💎."); return
+    ok,used,balance=database.admin_add_sapy_limited(admin_id,target.id,amount)
+    if not ok: await message.reply("❌ Недельный лимит превышен."); return
+    database.log_admin_action(chat_id,admin_id,"выдал сапы",target.id,amount,"выдача через админку группы")
+    await state.clear(); label=database.get_display_name(target.id,target.full_name)
+    await message.reply(f"✅ <a href=\"tg://user?id={target.id}\"><b>{html.escape(label)}</b></a> получил <b>+{amount} 💎</b>.\n📊 Лимит админа: <b>{used}/300</b>.")
 
 @dp.message(Command("admin"), F.chat.type == "private")
 async def admin_command(message: types.Message, state: FSMContext):
@@ -471,6 +572,7 @@ async def admin_title_action(message: types.Message, state: FSMContext):
     uid = int(parts[0].strip())
     title = parts[1].strip()
     database.admin_grant_title(uid, title, equip=True)
+    database.log_admin_action(0, message.from_user.id, "выдал титул", uid, details=title)
     await state.clear()
     await message.answer(f"✅ Титул <b>{html.escape(title)}</b> выдан <code>{uid}</code> и установлен.")
 
@@ -486,6 +588,7 @@ async def admin_nickname_action(message: types.Message, state: FSMContext):
     nickname = parts[1].strip()
     if nickname == "-":
         database.clear_custom_nickname(uid)
+        database.log_admin_action(0, message.from_user.id, "сбросил ник", uid)
         result = "сброшен — снова используется имя Telegram"
     else:
         if len(nickname) > 32:
@@ -784,6 +887,8 @@ async def group_farm_callback(callback: types.CallbackQuery):
     if callback.message.chat.type not in ["group", "supergroup"]:
         await callback.answer("Ферма работает в группах", show_alert=True)
         return
+    if not group_feature_enabled(callback.message.chat.id, "farm"):
+        await callback.answer("🌱 Ферма отключена администратором.", show_alert=True); return
     database.ensure_economy_user(callback.message.chat.id, callback.from_user.id)
     await callback.message.answer(farm.build_farm_text(callback.message.chat.id, callback.from_user.id))
     await callback.answer()
@@ -794,6 +899,8 @@ async def group_bonus_callback(callback: types.CallbackQuery):
     if callback.message.chat.type not in ["group", "supergroup"]:
         await callback.answer("Бонус работает в группах", show_alert=True)
         return
+    if not group_feature_enabled(callback.message.chat.id, "economy"):
+        await callback.answer("💎 Экономика отключена администратором.", show_alert=True); return
     await send_daily_bonus(callback.message, callback.from_user)
     await callback.answer()
 
@@ -811,6 +918,8 @@ async def group_top_callback(callback: types.CallbackQuery):
 async def group_quest_callback(callback: types.CallbackQuery):
     if callback.message.chat.type not in ["group", "supergroup"]:
         await callback.answer("Задания работают в группах", show_alert=True); return
+    if not group_feature_enabled(callback.message.chat.id, "quests"):
+        await callback.answer("📜 Задания отключены администратором.", show_alert=True); return
     await callback.message.answer(build_daily_quest_text(callback.message.chat.id, callback.from_user.id))
     await callback.answer()
 
@@ -818,11 +927,15 @@ async def group_quest_callback(callback: types.CallbackQuery):
 async def group_season_callback(callback: types.CallbackQuery):
     if callback.message.chat.type not in ["group", "supergroup"]:
         await callback.answer("Сезоны работают в группах", show_alert=True); return
+    if not group_feature_enabled(callback.message.chat.id, "seasons"):
+        await callback.answer("🏆 Сезоны отключены администратором.", show_alert=True); return
     await callback.message.answer(build_season_text(callback.message.chat.id, callback.from_user.id))
     await callback.answer()
 
 @dp.callback_query(F.data == "group_event")
 async def group_event_callback(callback: types.CallbackQuery):
+    if callback.message.chat.type in ["group", "supergroup"] and not group_feature_enabled(callback.message.chat.id, "events"):
+        await callback.answer("🎉 События отключены администратором.", show_alert=True); return
     event_id, title, desc = database.current_event()
     await callback.message.answer(f"🎉 <b>{title}</b>\n\n{desc}\n\nСобытие меняется каждую неделю.")
     await callback.answer()
@@ -1248,6 +1361,7 @@ async def handle_messages(message: types.Message):
             return
         rarity,name,desc=AWARD_DEFS[int(arg)-1]
         database.add_group_award(chat_id,user_id,target.id,name,desc,rarity)
+        database.log_admin_action(chat_id,user_id,"выдал награду",target.id,details=f"{name} · редкость {rarity}/5")
         label=database.get_display_name(target.id,target.full_name)
         title=database.get_user_title(target.id)
         if title: label=f"{title} · {label}"
@@ -1444,14 +1558,20 @@ async def handle_messages(message: types.Message):
 
     # 13. ЕЖЕДНЕВНЫЙ БОНУС
     if text in ["бонус", "ежедневный бонус", "дейлик"]:
+        if message.chat.type in ["group", "supergroup"] and not group_feature_enabled(chat_id, "economy"):
+            await message.answer("💎 Экономика отключена администратором этой группы."); return
         await send_daily_bonus(message, message.from_user)
         return
 
     if text in ["задание", "задания", "дейлик задание"]:
+        if not group_feature_enabled(chat_id, "quests"):
+            await message.answer("📜 Задания отключены администратором этой группы."); return
         await message.answer(build_daily_quest_text(chat_id, user_id))
         return
 
     if text in ["задание забрать", "забрать задание"]:
+        if not group_feature_enabled(chat_id, "quests"):
+            await message.answer("📜 Задания отключены администратором этой группы."); return
         ok, q, coins_total, sapy_total = database.claim_daily_quest(chat_id, user_id)
         if not ok:
             if q["claimed"]:
@@ -1463,10 +1583,14 @@ async def handle_messages(message: types.Message):
         return
 
     if text in ["сезон", "сезоны", "рейтинг сезона"]:
+        if not group_feature_enabled(chat_id, "seasons"):
+            await message.answer("🏆 Сезоны отключены администратором этой группы."); return
         await message.answer(build_season_text(chat_id, user_id))
         return
 
     if text in ["событие", "ивент"]:
+        if not group_feature_enabled(chat_id, "events"):
+            await message.answer("🎉 События отключены администратором этой группы."); return
         event_id, title, desc = database.current_event()
         await message.answer(f"🎉 <b>{title}</b>\n\n{desc}\n\nСобытие меняется каждую неделю.")
         return
@@ -1478,6 +1602,8 @@ async def handle_messages(message: types.Message):
 
     # 14. ФЕРМА
     if text == "ферма":
+        if not group_feature_enabled(chat_id, "farm"):
+            await message.answer("🌱 Ферма отключена администратором этой группы."); return
         first = database.ensure_economy_user(chat_id, user_id)
         if first:
             await message.answer(
