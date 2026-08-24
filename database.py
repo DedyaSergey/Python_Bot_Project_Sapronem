@@ -296,12 +296,13 @@ def claim_previous_season_rewards(chat_id, user_id):
 
     # Памятное достижение для топ-3. Не заменяет обычный купленный титул.
     season_title = None
-    if place == 1:
-        season_title = f"🏆 Чемпион сезона {season}"
-    elif place == 2:
-        season_title = f"🥈 Серебряный призёр {season}"
-    elif place == 3:
-        season_title = f"🥉 Бронзовый призёр {season}"
+    season_titles = {
+        1: "👑 Властелин сезона", 2: "🥈 Серебряная звезда", 3: "🥉 Бронзовый герой",
+        4: "🔥 Четвёртый в строю", 5: "⚡ Пятёрка сезона", 6: "💎 Алмазный игрок",
+        7: "🐉 Дракон рейтинга", 8: "🦅 Орёл сезона", 9: "🌟 Девятая звезда", 10: "🏹 Охотник за топом"
+    }
+    if place in season_titles:
+        season_title = f"{season_titles[place]} #{season.split('-W')[-1]}"
     if season_title:
         cursor.execute("INSERT OR REPLACE INTO season_achievements(season_id,chat_id,user_id,place,title) VALUES(?,?,?,?,?)", (season,chat_id,user_id,place,season_title))
 
@@ -462,11 +463,10 @@ def get_first_seen(user_id):
     return row[0] if row else 0
 
 def get_top_dice(chat_id, limit=10):
-    """Возвращает (user_id, user_name, dice_score) для кликабельного топа."""
     cursor.execute("""
-    SELECT user_id, user_name, dice_score FROM reputation
+    SELECT user_name, dice_score FROM reputation 
     WHERE chat_id = ? AND dice_score > 0
-    ORDER BY dice_score DESC, user_id ASC LIMIT ?
+    ORDER BY dice_score DESC LIMIT ?
     """, (chat_id, limit))
     return cursor.fetchall()
 
@@ -715,6 +715,30 @@ def init_shop_db():
     )
     """)
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS achievements (
+        user_id INTEGER,
+        achievement_id TEXT,
+        title TEXT,
+        description TEXT,
+        rarity INTEGER DEFAULT 1,
+        awarded_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, achievement_id)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS group_awards (
+        chat_id INTEGER,
+        award_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_user_id INTEGER,
+        to_user_id INTEGER,
+        name TEXT,
+        description TEXT,
+        rarity INTEGER DEFAULT 1,
+        created_at INTEGER NOT NULL
+    )
+    """)
+
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_titles (
         user_id INTEGER,
         title TEXT,
@@ -960,3 +984,80 @@ def admin_payment_history(limit=20):
 def admin_all_user_ids():
     cursor.execute("SELECT user_id FROM user_meta")
     return [row[0] for row in cursor.fetchall()]
+
+
+# --- ДОСТИЖЕНИЯ И НАГРАДЫ ---
+ACHIEVEMENT_DEFS = [
+    ("first_message", "💬 Первое слово", "Отправить первое сообщение", 1),
+    ("messages_100", "🗣️ Болтун", "100 сообщений", 1),
+    ("messages_1000", "📣 Голос чата", "1 000 сообщений", 2),
+    ("messages_5000", "🎙️ Легенда чата", "5 000 сообщений", 4),
+    ("dice_100", "🎲 Игрок", "100 бросков кубика", 1),
+    ("dice_1000", "🎰 Зависимый от удачи", "1 000 бросков кубика", 3),
+    ("karma_25", "⭐ Уважаемый", "25 кармы", 2),
+    ("karma_100", "🌟 Авторитет", "100 кармы", 4),
+    ("ref_3", "👥 Свой человек", "3 реферала", 2),
+    ("ref_10", "📢 Агитатор", "10 рефералов", 3),
+    ("sapy_500", "💎 Саповый запас", "500 сапов", 2),
+    ("sapy_5000", "💎 Магнат", "5 000 сапов", 5),
+    ("season_100", "🏆 Претендент", "100 очков сезона", 2),
+    ("profile", "👤 В игре", "Создать профиль", 1),
+    ("vip", "👑 Премиум", "Получить VIP", 3),
+]
+
+def list_achievement_defs():
+    return ACHIEVEMENT_DEFS
+
+def get_achievements(user_id):
+    cursor.execute("SELECT achievement_id,title,description,rarity,awarded_at FROM achievements WHERE user_id=? ORDER BY rarity DESC, awarded_at DESC", (user_id,))
+    return cursor.fetchall()
+
+def has_achievement(user_id, achievement_id):
+    cursor.execute("SELECT 1 FROM achievements WHERE user_id=? AND achievement_id=?", (user_id, achievement_id))
+    return cursor.fetchone() is not None
+
+def grant_achievement(user_id, achievement_id):
+    row = next((x for x in ACHIEVEMENT_DEFS if x[0] == achievement_id), None)
+    if not row or has_achievement(user_id, achievement_id):
+        return False, row
+    _, title, desc, rarity = row
+    cursor.execute("INSERT INTO achievements(user_id,achievement_id,title,description,rarity,awarded_at) VALUES(?,?,?,?,?,?)", (user_id,achievement_id,title,desc,rarity,int(time.time())))
+    conn.commit()
+    return True, row
+
+def evaluate_achievements(user_id, chat_id=0):
+    checks = []
+    if chat_id:
+        msgs = get_user_messages(chat_id,user_id)
+        dice = get_user_dice_score(chat_id,user_id)
+        karma = get_karma(chat_id,user_id)
+        season = get_season_points(chat_id,user_id)
+        if msgs >= 1: checks.append("first_message")
+        if msgs >= 100: checks.append("messages_100")
+        if msgs >= 1000: checks.append("messages_1000")
+        if msgs >= 5000: checks.append("messages_5000")
+        if dice >= 100: checks.append("dice_100")
+        if dice >= 1000: checks.append("dice_1000")
+        if karma >= 25: checks.append("karma_25")
+        if karma >= 100: checks.append("karma_100")
+        if season >= 100: checks.append("season_100")
+    if get_referral_count(user_id) >= 3: checks.append("ref_3")
+    if get_referral_count(user_id) >= 10: checks.append("ref_10")
+    if get_sapy(user_id) >= 500: checks.append("sapy_500")
+    if get_sapy(user_id) >= 5000: checks.append("sapy_5000")
+    if get_profile(user_id): checks.append("profile")
+    if vip_seconds_left(user_id) > 0: checks.append("vip")
+    newly=[]
+    for aid in checks:
+        ok,row=grant_achievement(user_id,aid)
+        if ok: newly.append(row)
+    return newly
+
+def add_group_award(chat_id, from_user_id, to_user_id, name, description, rarity):
+    cursor.execute("INSERT INTO group_awards(chat_id,from_user_id,to_user_id,name,description,rarity,created_at) VALUES(?,?,?,?,?,?,?)", (chat_id,from_user_id,to_user_id,name,description,int(rarity),int(time.time())))
+    conn.commit()
+    return cursor.lastrowid
+
+def get_group_awards(chat_id, user_id, limit=50):
+    cursor.execute("SELECT award_id,from_user_id,name,description,rarity,created_at FROM group_awards WHERE chat_id=? AND to_user_id=? ORDER BY created_at DESC LIMIT ?", (chat_id,user_id,limit))
+    return cursor.fetchall()

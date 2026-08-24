@@ -27,6 +27,29 @@ dp = Dispatcher()
 DICE_COOLDOWN = {}
 PROPOSED_MARRIAGES = {}
 
+AWARD_DEFS = [
+    (1, "👏 Лайк", "За приятную помощь"),
+    (1, "😊 Добряк", "За хорошее настроение"),
+    (1, "💬 Душа чата", "За активность"),
+    (1, "🌱 Поддержка", "За помощь новичкам"),
+    (2, "⭐ Уважение", "За заметный вклад"),
+    (2, "🎯 Точный игрок", "За полезность и меткость"),
+    (2, "🎁 Даритель", "За щедрость"),
+    (2, "🤝 Надёжный", "За взаимопомощь"),
+    (3, "🔥 Огненный участник", "За мощную активность"),
+    (3, "🏅 Герой группы", "За вклад в сообщество"),
+    (3, "🧠 Мозг чата", "За полезные идеи"),
+    (3, "🛡️ Защитник", "За поддержку участников"),
+    (4, "👑 Легенда", "За выдающийся вклад"),
+    (4, "🐉 Дракон чата", "За редкие достижения"),
+    (4, "💎 Элита", "За исключительный вклад"),
+    (4, "🌌 Звезда сообщества", "За влияние на группу"),
+    (5, "🏆 Гранд-мастер", "Высшая награда группы"),
+    (5, "👑 Вечная легенда", "Исключительная награда"),
+    (5, "💠 Артефакт группы", "За событие, которое запомнили все"),
+    (5, "🌠 Герой сезона", "Особая награда от администрации"),
+]
+
 # ID владельца/админов задаётся в Railway Variables:
 # ADMIN_IDS=123456789,987654321
 def load_admin_ids():
@@ -97,6 +120,15 @@ def private_menu(profile_exists=False):
 
 
 def group_menu():
+    # Постоянная клавиатура в сообщениях игры — только полезная ежедневная кнопка.
+    # Полное меню показываем один раз при добавлении бота в группу.
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Бонус", callback_data="group_bonus")],
+    ])
+
+
+def group_onboarding_menu():
+    # Полное меню только для приветственного сообщения после добавления бота.
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌱 Ферма", callback_data="group_farm"), InlineKeyboardButton(text="🎁 Бонус", callback_data="group_bonus")],
         [InlineKeyboardButton(text="🏆 Топ", callback_data="group_top"), InlineKeyboardButton(text="📜 Задание", callback_data="group_quest")],
@@ -651,6 +683,8 @@ async def group_help_callback(callback: types.CallbackQuery):
         "🎲 <code>кубы</code> / <code>топ кубы</code>\n"
         "👤 <code>профиль</code> — твой профиль (или ответом на сообщение)\n"
         "🏷️ <code>титулы</code> — коллекция титулов\n"
+        "🏅 <code>достижения</code> — твои достижения\n"
+        "🎁 <code>награды</code> — награды от администрации\n"
         "✏️ <code>+ник Имя</code> / <code>-ник</code> — изменить ник\n"
         "⭐ <code>карма</code> — репутация\n"
         "💍 <code>брак</code> — предложить брак ответом на сообщение\n"
@@ -694,13 +728,11 @@ def build_season_text(chat_id, user_id):
         medals = ["🥇", "🥈", "🥉"]
         for i, (_uid, user_name, points) in enumerate(top_rows, 1):
             medal = medals[i - 1] if i <= 3 else f"{i}."
-            # Кликабельное упоминание ведёт на профиль Telegram; отображается
-            # именно кастомный ник, а при его отсутствии — обычное имя.
-            display_name = database.get_display_name(_uid, user_name or "Игрок")
+            # Обычный текст: никакой tg://user ссылки и никакой кликабельности.
+            display_name = html.escape(str(database.get_display_name(_uid, user_name or "Игрок")))
             title = database.get_user_title(_uid)
-            label = f"{title} · {display_name}" if title else display_name
-            mention = f'<a href="tg://user?id={_uid}">{html.escape(label)}</a>'
-            lines.append(f"{medal} <b>{mention}</b> — <b>{points}</b> очк.")
+            label = f"{html.escape(title)} · {display_name}" if title else display_name
+            lines.append(f"{medal} {label} — <b>{points}</b> очк.")
 
     my_points = database.get_season_points(chat_id, user_id)
     claimed, place, coins, sapy = database.claim_previous_season_rewards(chat_id, user_id)
@@ -767,12 +799,13 @@ async def welcome_new_member(message: types.Message):
         if member.id == bot.id:
             await message.answer(
                 "🚀 <b>Sapronem подключён!</b>\n\n"
-                "Теперь в этой группе доступны рейтинг активности, репутация, ферма, кубы, RP-команды, браки и модерация.\n\n"
+                "🎮 Теперь в этой группе можно играть, соревноваться и развивать свою ферму.\n"
+                "🏆 Сезоны • 🌱 ферма • 🎁 задания • 💎 сапы • 🏅 достижения\n\n"
                 "🌱 Напиши <code>ферма</code>\n"
                 "🏆 <code>топ весь</code>\n"
                 "🎁 <code>бонус</code>\n"
                 "❓ Или нажми кнопку ниже.",
-                reply_markup=group_menu(),
+                reply_markup=group_onboarding_menu(),
             )
             continue
         user_mention = f'<a href="tg://user?id={member.id}">{member.full_name}</a>'
@@ -849,6 +882,10 @@ async def handle_messages(message: types.Message):
         season_gain = 2 if event_id == "social" else 1
         database.add_season_points(chat_id, user_id, season_gain)
         database.progress_daily_quest(chat_id, user_id, "messages", 1)
+        newly_achievements = database.evaluate_achievements(user_id, chat_id)
+        if newly_achievements:
+            for _aid, ach_title, ach_desc, rarity in newly_achievements:
+                await message.answer(f"🏅 <b>Новое достижение!</b>\n{'⭐'*rarity} {html.escape(ach_title)}\n└ {html.escape(ach_desc)}")
 
     # ВНИМАНИЕ: ниже независимые блоки "if ... return", а не одна большая
     # elif-цепочка. Раньше в середине файла был отдельный блок проверки
@@ -990,6 +1027,68 @@ async def handle_messages(message: types.Message):
         if message.chat.type in ["private"]:
             return
         await message.answer(top.build_top_dice_text(chat_id))
+        return
+
+    # 11. ДОСТИЖЕНИЯ И НАГРАДЫ
+    if text in ["достижения", "ачивки", "ачивки"]:
+        rows = database.get_achievements(user_id)
+        lines = ["🏅 <b>Твои достижения</b>", ""]
+        if not rows:
+            lines.append("Пока нет достижений. Играй, общайся и развивайся! 🚀")
+        else:
+            for _aid, title, desc, rarity, _at in rows:
+                lines.append(f"{'⭐' * rarity} <b>{html.escape(title)}</b> — редкость {rarity}/5")
+                lines.append(f"└ {html.escape(desc)}")
+            lines += ["", f"🏅 Получено: <b>{len(rows)}</b>"]
+        await message.answer("\n".join(lines))
+        return
+
+    if text == "награды":
+        if message.chat.type not in ["group", "supergroup"]:
+            await message.answer("🎁 Награды выдаются администрацией групп.")
+            return
+        rows = database.get_group_awards(chat_id, user_id)
+        lines = ["🎁 <b>Твои награды</b>", ""]
+        if not rows:
+            lines.append("Пока наград нет.")
+        else:
+            for _aid, from_uid, name, desc, rarity, _at in rows:
+                giver = database.get_display_name(from_uid, "Админ")
+                lines.append(f"{'⭐' * rarity} <b>{html.escape(name)}</b> — от {html.escape(giver)}")
+                lines.append(f"└ {html.escape(desc)}")
+        await message.answer("\n".join(lines))
+        return
+
+    if text == "награда" or text.startswith("награда "):
+        if message.chat.type not in ["group", "supergroup"]:
+            return
+        if not await rights.is_admin(bot, chat_id, user_id):
+            await message.reply("❌ Только администратор группы может выдавать награды.")
+            return
+        if not message.reply_to_message:
+            await message.reply("Ответь командой <code>награда 1</code> на сообщение пользователя.\n\n<code>награда</code> — список наград.")
+            return
+        target = message.reply_to_message.from_user
+        if target.id == user_id:
+            await message.reply("❌ Нельзя награждать самого себя.")
+            return
+        arg = text.removeprefix("награда").strip()
+        if not arg:
+            lines=["🎁 <b>Награды группы</b>", "", "Формат: <code>награда НОМЕР</code>", ""]
+            for i,(rarity,name,desc) in enumerate(AWARD_DEFS,1):
+                lines.append(f"<code>{i}</code>. {'⭐'*rarity} <b>{html.escape(name)}</b> — {html.escape(desc)}")
+            await message.reply("\n".join(lines))
+            return
+        if not arg.isdigit() or not (1 <= int(arg) <= len(AWARD_DEFS)):
+            await message.reply(f"❌ Выбери номер от 1 до {len(AWARD_DEFS)}.")
+            return
+        rarity,name,desc=AWARD_DEFS[int(arg)-1]
+        database.add_group_award(chat_id,user_id,target.id,name,desc,rarity)
+        label=database.get_display_name(target.id,target.full_name)
+        title=database.get_user_title(target.id)
+        if title: label=f"{title} · {label}"
+        mention=f'<a href="tg://user?id={target.id}">{html.escape(label)}</a>'
+        await message.reply(f"🎁 {mention} получил награду <b>{html.escape(name)}</b>!\n{'⭐'*rarity} Редкость: <b>{rarity}/5</b>")
         return
 
     # 11. ТИТУЛЫ

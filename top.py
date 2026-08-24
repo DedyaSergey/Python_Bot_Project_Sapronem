@@ -19,7 +19,7 @@ def build_top_messages_text(chat_id: int) -> str:
     lines = ["<b>📊 Топ по количеству сообщений:</b>\n"]
     for i, (user_id, user_name, count) in enumerate(rows, start=1):
         place = MEDALS.get(i, f"{i}.")
-        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b> ")
+        lines.append(f"{place} {mention(user_id, user_name)} — <b>{count}</b> соо")
     return "\n".join(lines)
 
 
@@ -31,10 +31,8 @@ def build_top_dice_text(chat_id: int) -> str:
     lines = ["<b>🏆 Топ везунчиков чата по кубам:</b>\n"]
     for i, (user_id, user_name, total_score) in enumerate(rows, start=1):
         place = MEDALS.get(i, f"{i}.")
-        label = db.get_display_name(user_id, user_name)
+        display = db.get_display_name(user_id, user_name)
         title = db.get_user_title(user_id)
-        if title:
-            label = f"{title} · {label}"
-        mention = f'<a href="tg://user?id={user_id}">{html.escape(label)}</a>'
-        lines.append(f"{place} <b>{mention}</b> — {total_score} очков 🎲")
+        label = f"{title} · {display}" if title else display
+        lines.append(f"{place} <b>{label}</b> — {total_score} очков 🎲")
     return "\n".join(lines)
