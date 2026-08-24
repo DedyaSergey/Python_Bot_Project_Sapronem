@@ -28,6 +28,18 @@ dp = Dispatcher()
 DICE_COOLDOWN = {}
 PROPOSED_MARRIAGES = {}
 
+RARITY_INFO = {
+    1: ("⚪", "Обычная"),
+    2: ("🟢", "Необычная"),
+    3: ("🔵", "Редкая"),
+    4: ("🟣", "Эпическая"),
+    5: ("🟠", "Легендарная"),
+}
+
+def rarity_text(rarity: int) -> str:
+    icon, name = RARITY_INFO.get(int(rarity), ("⭐", "Особая"))
+    return f"{icon} {name} · {int(rarity)}/5"
+
 AWARD_DEFS = [
     (1, "👏 Лайк", "За приятную помощь"),
     (1, "😊 Добряк", "За хорошее настроение"),
@@ -92,7 +104,9 @@ def admin_menu():
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
          InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
         [InlineKeyboardButton(text="👤 Пользователь", callback_data="admin_user")],
-        [InlineKeyboardButton(text="💎 Выдать сапы · лимит 300/нед", callback_data="admin_add_sapy")],
+        [InlineKeyboardButton(text="🏠 Группы", callback_data="admin_groups"),
+         InlineKeyboardButton(text="📜 Действия", callback_data="admin_actions")],
+        [InlineKeyboardButton(text="🛡️ Проверка прав", callback_data="admin_rights_help")],
         [InlineKeyboardButton(text="🏷️ Выдать титул", callback_data="admin_add_title"),
          InlineKeyboardButton(text="✏️ Сменить ник", callback_data="admin_nickname")],
         [InlineKeyboardButton(text="🔄 Обновить ID админов", callback_data="admin_reload")],
@@ -101,7 +115,18 @@ def admin_menu():
 def dev_menu():
     status = "ВКЛ" if database.is_global_season_enabled() else "ВЫКЛ"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Проект", callback_data="dev_project_stats"),
+         InlineKeyboardButton(text="🏠 Все группы", callback_data="dev_groups")],
+        [InlineKeyboardButton(text="🚨 Центр событий", callback_data="dev_events"),
+         InlineKeyboardButton(text="🩺 Состояние", callback_data="dev_health")],
+        [InlineKeyboardButton(text="👮 Админы · активность", callback_data="dev_admin_online"),
+         InlineKeyboardButton(text="📜 Действия админов", callback_data="dev_admin_actions")],
+        [InlineKeyboardButton(text="🏅 Рейтинг админов", callback_data="dev_admin_rating"),
+         InlineKeyboardButton(text="💾 Бэкап БД", callback_data="dev_backup")],
         [InlineKeyboardButton(text="🌐 Глобальный сезон", callback_data="dev_global")],
+        [InlineKeyboardButton(text="📦 Экономика", callback_data="dev_economy")],
+        [InlineKeyboardButton(text="🔎 Пользователь", callback_data="dev_user_lookup")],
+        [InlineKeyboardButton(text="🧪 Тестовый центр", callback_data="dev_sandbox")],
         [InlineKeyboardButton(text=f"🌐 Сезон: {status}", callback_data="dev_global_toggle")],
         [InlineKeyboardButton(text="✏️ Название сезона", callback_data="dev_global_name"),
          InlineKeyboardButton(text="🎁 Награды сезона", callback_data="dev_global_rewards")],
@@ -129,7 +154,8 @@ class DevForm(StatesGroup):
     SAPY_ACTION = State()
 
 class GroupAdminForm(StatesGroup):
-    SAPY_ACTION = State()
+    PLAYER = State()
+    AWARD = State()
 
 # Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
 STAR_PACKAGES = {
@@ -137,6 +163,8 @@ STAR_PACKAGES = {
     "150": {"stars": 150, "sapy": 1650, "title": "💎 1 650 сапов"},
     "500": {"stars": 500, "sapy": 6000, "title": "💎 6 000 сапов"},
 }
+
+pending_quizzes = {}
 
 class ProfileForm(StatesGroup):
     SET_NAME = State()
@@ -180,11 +208,42 @@ def group_onboarding_menu():
 def group_admin_menu(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data=f"gadmin_stats:{chat_id}"),
+         InlineKeyboardButton(text="📈 Аналитика", callback_data=f"gadmin_analytics:{chat_id}")],
+        [InlineKeyboardButton(text="👥 Игроки", callback_data=f"gadmin_players:{chat_id}"),
          InlineKeyboardButton(text="📜 Журнал", callback_data=f"gadmin_log:{chat_id}")],
-        [InlineKeyboardButton(text="👤 Игрок", callback_data=f"gadmin_user:{chat_id}"),
-         InlineKeyboardButton(text="💎 Выдать сапы", callback_data=f"gadmin_sapy:{chat_id}")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"gadmin_settings:{chat_id}")],
+        [InlineKeyboardButton(text="🎁 Награды", callback_data=f"gadmin_awards:{chat_id}"),
+         InlineKeyboardButton(text="🏆 Сезон", callback_data=f"gadmin_season:{chat_id}")],
+        [InlineKeyboardButton(text="🛡️ Модерация", callback_data=f"gadmin_moderation:{chat_id}"),
+         InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"gadmin_settings:{chat_id}")],
     ])
+
+def group_moderation_menu(chat_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ Варн", callback_data=f"gmod:warn:{chat_id}"),
+         InlineKeyboardButton(text="🔇 Мут", callback_data=f"gmod:mute:{chat_id}")],
+        [InlineKeyboardButton(text="🚫 Бан", callback_data=f"gmod:ban:{chat_id}"),
+         InlineKeyboardButton(text="🧹 Удалить", callback_data=f"gmod:delete:{chat_id}")],
+        [InlineKeyboardButton(text="⬅️ Админка", callback_data=f"gadmin_home:{chat_id}")],
+    ])
+
+def funny_admin_denial():
+    return random.choice([
+        "🚫 Доступ запрещён. Ты не админ — кнопки просто делают вид, что тебя не заметили 😎",
+        "🕵️ Проверка админа... 0%... 0%... 0%. Увы, сегодня без админских суперсил.",
+        "🔐 Секретная админская кнопка. Секрет в том, что тебе её нельзя нажимать 😂",
+        "👀 Я бы пустил тебя в админку, но Telegram уже пожаловался на твою наглость.",
+        "🧙 Админская магия не сработала. Нужен статус администратора группы.",
+    ])
+
+async def deny_group_admin_click(callback: types.CallbackQuery):
+    try:
+        msg = await callback.message.answer(funny_admin_denial())
+        await asyncio.sleep(4)
+        await msg.delete()
+    except Exception:
+        pass
+    await callback.answer("Доступ только для админов", show_alert=False)
+
 
 def group_settings_menu(chat_id: int):
     vals=database.get_group_settings(chat_id)
@@ -201,7 +260,7 @@ async def group_admin_command(message: types.Message, state: FSMContext):
         await message.reply("❌ Эта панель доступна только администраторам группы.")
         return
     await state.clear()
-    await message.reply("🛠️ <b>Админка группы</b>\n\nЗдесь только безопасные функции для управления Sapronem в этой группе.", reply_markup=group_admin_menu(message.chat.id))
+    await message.reply("🛠️ <b>Админка группы</b>\n\nУправляй Sapronem в этой группе. Выдача сапов и глобальные функции находятся только у разработчика.", reply_markup=group_admin_menu(message.chat.id))
 
 @dp.callback_query(F.data.startswith("gadmin_"))
 async def group_admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
@@ -210,13 +269,26 @@ async def group_admin_callbacks(callback: types.CallbackQuery, state: FSMContext
     except Exception:
         await callback.answer("Ошибка", show_alert=True); return
     if not await rights.is_admin(bot, chat_id, callback.from_user.id):
-        await callback.answer("❌ Вы больше не администратор этой группы.", show_alert=True); return
+        await deny_group_admin_click(callback); return
+    database.touch_activity(callback.from_user.id, chat_id, count_message=False)
     await callback.answer()
     if action == "gadmin_home":
         await callback.message.edit_text("🛠️ <b>Админка группы</b>\n\nВыбери действие:", reply_markup=group_admin_menu(chat_id)); return
     if action == "gadmin_stats":
         st=database.admin_group_stats(chat_id)
         await callback.message.answer("📊 <b>Статистика группы</b>\n\n" f"👥 Участников Sapronem: <b>{st['members']}</b>\n" f"💬 Сообщений: <b>{st['messages']}</b>\n" f"🔥 Активных игроков: <b>{st['active']}</b>\n" f"🌱 Активных ферм: <b>{st['farms']}</b>\n" f"🏆 Игроков в сезоне: <b>{st['season_players']}</b>"); return
+    if action == "gadmin_analytics":
+        st=database.admin_group_stats(chat_id)
+        top_msgs=database.get_top_messages(chat_id,5)
+        lines=["📈 <b>Аналитика группы</b>","",f"💬 Всего сообщений: <b>{st['messages']}</b>",f"🔥 Активных игроков: <b>{st['active']}</b>",f"🌱 Активных ферм: <b>{st['farms']}</b>","","🏅 <b>Самые активные</b>"]
+        if top_msgs:
+            for i,(uid,name,count) in enumerate(top_msgs,1):
+                display=database.get_display_name(uid,name)
+                lines.append(f"{i}. <a href=\"tg://user?id={uid}\">{html.escape(display)}</a> — {count} соо")
+        else: lines.append("Пока недостаточно данных.")
+        await callback.message.answer("\n".join(lines)); return
+    if action == "gadmin_players":
+        await callback.message.answer("👥 <b>Игроки</b>\n\nОтветь командой <code>профиль</code> на сообщение игрока, чтобы открыть его карточку.\n\nДля быстрого просмотра можно использовать <code>топ</code> и <code>сезон</code>."); return
     if action == "gadmin_log":
         rows=database.admin_action_log(chat_id,15)
         if not rows:
@@ -224,15 +296,42 @@ async def group_admin_callbacks(callback: types.CallbackQuery, state: FSMContext
         lines=["📜 <b>Последние действия админов</b>",""]
         for aid,act,target,amount,details,created in rows:
             dt=time.strftime("%d.%m %H:%M",time.localtime(created)); t=f" → <code>{target}</code>" if target else ""; a=f" · {amount} 💎" if amount else ""
-            lines.append(f"👮 <code>{aid}</code> — {html.escape(act)}{t}{a}\n└ {html.escape(details)} · {dt}")
+            lines.append(f"👮 <code>{aid}</code> — {html.escape(act)}{t}{a}\n└ {html.escape(details or '')} · {dt}")
         await callback.message.answer("\n".join(lines)); return
-    if action == "gadmin_user":
-        await callback.message.answer("👤 Для просмотра игрока используй <code>профиль</code> ответом на его сообщение.\n\nАдминские действия доступны через награды и выдачу сапов."); return
-    if action == "gadmin_sapy":
-        await state.set_state(GroupAdminForm.SAPY_ACTION); await state.update_data(group_chat_id=chat_id)
-        await callback.message.answer("💎 <b>Выдача сапов</b>\nОтветь на сообщение игрока и следующим сообщением напиши количество.\nЛимит: <b>300 💎/неделю на одного админа</b>.") ; return
+    if action == "gadmin_awards":
+        lines=["🎁 <b>Награды группы</b>","","Награждать можно только другого участника группы.","Ответь на его сообщение командой <code>награда НОМЕР</code>.","","Доступные награды:"]
+        for i,(rarity,name,desc) in enumerate(AWARD_DEFS,1):
+            lines.append(f"<code>{i}</code>. {rarity_text(rarity)} · <b>{html.escape(name)}</b> — {html.escape(desc)}")
+        await callback.message.answer("\n".join(lines)); return
+    if action == "gadmin_season":
+        if not group_feature_enabled(chat_id,"seasons"):
+            await callback.message.answer("🏆 Сезоны сейчас выключены в настройках группы."); return
+        await callback.message.answer("🏆 <b>Сезон группы</b>\n\nИспользуй <code>сезон</code> для текущего рейтинга. Глобальные сезоны и их награды настраиваются только разработчиком."); return
+    if action == "gadmin_moderation":
+        await callback.message.edit_text("🛡️ <b>Модерация</b>\n\nВыбери действие и следуй подсказке. Бот должен иметь нужные права администратора.", reply_markup=group_moderation_menu(chat_id)); return
     if action == "gadmin_settings":
         await callback.message.answer("⚙️ <b>Настройки группы</b>", reply_markup=group_settings_menu(chat_id)); return
+
+@dp.callback_query(F.data.startswith("gmod:"))
+async def group_moderation_callbacks(callback: types.CallbackQuery):
+    try:
+        _, action, chat_id_s = callback.data.split(":",2); chat_id=int(chat_id_s)
+    except Exception:
+        await callback.answer("Ошибка", show_alert=True); return
+    if not await rights.is_admin(bot, chat_id, callback.from_user.id):
+        await deny_group_admin_click(callback); return
+    tips={
+        "warn":"⚠️ Ответь на сообщение игрока командой <code>варн</code>.",
+        "mute":"🔇 Ответь на сообщение игрока командой <code>мут 10</code> (минут).",
+        "ban":"🚫 Ответь на сообщение игрока командой <code>бан</code>.",
+        "delete":"🧹 Ответь на сообщение командой <code>удалить</code> или используй обычное удаление сообщения.",
+    }
+    if action == "home":
+        await callback.answer(); await callback.message.edit_text("🛡️ <b>Модерация</b>", reply_markup=group_moderation_menu(chat_id)); return
+    tip=tips.get(action)
+    if not tip:
+        await callback.answer("Неизвестное действие", show_alert=True); return
+    await callback.answer(); await callback.message.answer(tip)
 
 @dp.callback_query(F.data.startswith("gset:"))
 async def group_setting_toggle(callback: types.CallbackQuery):
@@ -241,7 +340,7 @@ async def group_setting_toggle(callback: types.CallbackQuery):
     except Exception:
         await callback.answer("Ошибка", show_alert=True); return
     if not await rights.is_admin(bot, chat_id, callback.from_user.id):
-        await callback.answer("❌ Нет доступа.", show_alert=True); return
+        await deny_group_admin_click(callback); return
     vals=database.get_group_settings(chat_id); mapping={"farm_enabled":0,"quests_enabled":1,"seasons_enabled":2,"events_enabled":3,"economy_enabled":4}
     idx=mapping.get(key)
     if idx is None: await callback.answer("Ошибка", show_alert=True); return
@@ -249,25 +348,6 @@ async def group_setting_toggle(callback: types.CallbackQuery):
     database.log_admin_action(chat_id,callback.from_user.id,"изменил настройку",details=key)
     await callback.answer("Настройка изменена")
     await callback.message.edit_reply_markup(reply_markup=group_settings_menu(chat_id))
-
-@dp.message(GroupAdminForm.SAPY_ACTION, F.chat.type.in_({"group","supergroup"}))
-async def group_admin_sapy_action(message: types.Message, state: FSMContext):
-    chat_id=message.chat.id; admin_id=message.from_user.id
-    if not await rights.is_admin(bot,chat_id,admin_id): await state.clear(); return
-    if not message.reply_to_message or not message.reply_to_message.from_user:
-        await message.reply("❌ Ответь на сообщение игрока и напиши только количество сапов."); return
-    try: amount=int((message.text or "").strip())
-    except ValueError: await message.reply("❌ Напиши только число, например <code>50</code>."); return
-    if amount<=0: await message.reply("❌ Количество должно быть больше 0."); return
-    target=message.reply_to_message.from_user
-    if target.id==admin_id: await message.reply("❌ Нельзя выдавать сапы самому себе."); return
-    remaining=database.admin_sapy_weekly_remaining(admin_id)
-    if amount>remaining: await message.reply(f"❌ Осталось <b>{remaining} 💎</b> из недельного лимита 300 💎."); return
-    ok,used,balance=database.admin_add_sapy_limited(admin_id,target.id,amount)
-    if not ok: await message.reply("❌ Недельный лимит превышен."); return
-    database.log_admin_action(chat_id,admin_id,"выдал сапы",target.id,amount,"выдача через админку группы")
-    await state.clear(); label=database.get_display_name(target.id,target.full_name)
-    await message.reply(f"✅ <a href=\"tg://user?id={target.id}\"><b>{html.escape(label)}</b></a> получил <b>+{amount} 💎</b>.\n📊 Лимит админа: <b>{used}/300</b>.")
 
 @dp.message(Command("admin"), F.chat.type == "private")
 async def admin_command(message: types.Message, state: FSMContext):
@@ -292,6 +372,39 @@ async def dev_command(message: types.Message, state: FSMContext):
         reply_markup=dev_menu()
     )
 
+@dp.callback_query(F.data == "admin_groups")
+async def admin_groups(callback: types.CallbackQuery):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Нет доступа", show_alert=True); return
+    groups=database.admin_known_group_ids(30)
+    lines=["🏠 <b>Группы Sapronem</b>",""]
+    for gid in groups:
+        try:
+            chat=await bot.get_chat(gid); title=html.escape(chat.title or str(gid))
+            st=database.admin_group_stats(gid)
+            lines.append(f"• <b>{title}</b> · 👥 {st['members']} · 💬 {st['messages']}")
+        except Exception:
+            lines.append(f"• <code>{gid}</code> · ⚠️ недоступна")
+    if len(lines)==2: lines.append("Групп пока нет.")
+    await callback.message.answer("\n".join(lines),reply_markup=admin_menu()); await callback.answer()
+
+@dp.callback_query(F.data == "admin_actions")
+async def admin_actions(callback: types.CallbackQuery):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Нет доступа", show_alert=True); return
+    rows=database.admin_recent_actions_all(25); lines=["📜 <b>Последние действия админов</b>",""]
+    for chat_id,admin_id,act,target,amount,details,created in rows:
+        dt=time.strftime("%d.%m %H:%M",time.localtime(created)); extra=f" · {html.escape(details)}" if details else ""
+        lines.append(f"🕐 {dt} · 👮 <code>{admin_id}</code> · {html.escape(act)}{extra} · <code>{chat_id}</code>")
+    if len(lines)==2: lines.append("Действий пока нет.")
+    await callback.message.answer("\n".join(lines),reply_markup=admin_menu()); await callback.answer()
+
+@dp.callback_query(F.data == "admin_rights_help")
+async def admin_rights_help(callback: types.CallbackQuery):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Нет доступа", show_alert=True); return
+    await callback.message.answer("🛡️ <b>Права</b>\n\nОбычная админка предназначена для безопасных действий проекта. Сапы, VIP, глобальные сезоны, платежи и рассылки остаются только в /dev.\n\nДля админов групп права проверяются по реальной роли Telegram в конкретной группе.",reply_markup=admin_menu()); await callback.answer()
+
 @dp.callback_query(F.data == "admin_reload")
 async def admin_reload(callback: types.CallbackQuery):
     global ADMIN_IDS
@@ -308,7 +421,145 @@ async def dev_callbacks(callback: types.CallbackQuery, state: FSMContext):
         return
     action = callback.data
     await callback.answer()
-    if action == "dev_global":
+    if action == "dev_project_stats":
+        s = database.admin_stats()
+        await callback.message.answer(
+            "📊 <b>Статистика проекта</b>\n\n"
+            f"👤 Пользователей: <b>{s['users']}</b>\n"
+            f"👥 Групп: <b>{s['groups']}</b>\n"
+            f"💬 Сообщений: <b>{s['messages']}</b>\n"
+            f"🔥 Активных 24ч: <b>{s['active_24h']}</b>\n"
+            f"📅 Активных 7д: <b>{s['active_7d']}</b>\n"
+            f"🌱 Посаженных культур: <b>{s['planted']}</b>\n"
+            f"🏆 Игроков в сезоне: <b>{s['season_players']}</b>\n"
+            f"🎁 Заданий сегодня: <b>{s['quests_today']}</b>\n"
+            f"💳 Платежей: <b>{s['payments']}</b> · ⭐ Stars: <b>{s['stars']}</b>\n"
+            f"👑 Активных VIP: <b>{s['vip']}</b>\n"
+            f"💎 Сапов в экономике: <b>{s['sapy']}</b>", reply_markup=dev_menu())
+    elif action == "dev_groups":
+        groups = database.admin_known_group_ids(50)
+        lines=["🏠 <b>Группы Sapronem</b>", ""]
+        if not groups:
+            lines.append("Групп пока не найдено.")
+        else:
+            for gid in groups:
+                try:
+                    chat = await bot.get_chat(gid)
+                    title = html.escape(chat.title or str(gid))
+                    members = database.admin_group_stats(gid)['members']
+                    lines.append(f"• <b>{title}</b> · <code>{gid}</code> · 👥 {members}")
+                except Exception:
+                    st=database.admin_group_stats(gid)
+                    lines.append(f"• <code>{gid}</code> · 👥 {st['members']} · ⚠️ недоступна")
+        lines.append("\n<i>Показаны последние известные группы, максимум 50.</i>")
+        await callback.message.answer("\n".join(lines), reply_markup=dev_menu())
+    elif action == "dev_events":
+        rows = database.dev_recent_events(30)
+        lines=["🚨 <b>Центр событий</b>", ""]
+        if not rows:
+            lines.append("Событий пока нет.")
+        else:
+            for created, kind, chat_id, user_id, details in rows:
+                dt=time.strftime("%d.%m %H:%M", time.localtime(created))
+                icon={"admin":"👮","group":"🏠","error":"🔴","system":"⚙️"}.get(kind,"🔔")
+                lines.append(f"{icon} {dt} · <code>{user_id or '-'} </code> · {html.escape(details or kind)} · <code>{chat_id or 0}</code>")
+        await callback.message.answer("\n".join(lines), reply_markup=dev_menu())
+    elif action == "dev_health":
+        try:
+            me=await bot.get_me()
+            bot_ok=True
+            bot_name=me.username or me.full_name
+        except Exception:
+            bot_ok=False; bot_name="неизвестно"
+        db_ok=True
+        db_info=""
+        try:
+            database.health_check()
+            db_info="OK"
+        except Exception as e:
+            db_ok=False; db_info=str(e)[:80]
+        await callback.message.answer(
+            "🩺 <b>Состояние Sapronem</b>\n\n"
+            f"{'🟢' if bot_ok else '🔴'} Telegram API: <b>{html.escape(str(bot_name))}</b>\n"
+            f"{'🟢' if db_ok else '🔴'} База данных: <b>{html.escape(db_info)}</b>\n"
+            f"💾 DB_PATH: <code>{html.escape(database.DB_PATH)}</code>\n"
+            f"🕐 Проверено: <b>{time.strftime('%d.%m.%Y %H:%M:%S')}</b>", reply_markup=dev_menu())
+    elif action == "dev_admin_rating":
+        rows=database.admin_action_rating(20)
+        lines=["🏅 <b>Рейтинг админов</b>", "", "Количество действий за всё время"]
+        if not rows:
+            lines.append("Пока нет действий.")
+        else:
+            for i,(admin_id,count,last_seen) in enumerate(rows,1):
+                dt=time.strftime("%d.%m %H:%M", time.localtime(last_seen)) if last_seen else "—"
+                lines.append(f"{i}. 👮 <code>{admin_id}</code> · <b>{count}</b> действий · последнее {dt}")
+        await callback.message.answer("\n".join(lines), reply_markup=dev_menu())
+    elif action == "dev_backup":
+        try:
+            path=database.create_db_backup()
+            await callback.message.answer(f"💾 <b>Резервная копия создана</b>\n\n<code>{html.escape(path)}</code>\n\nТеперь её можно скачать из файловой системы Railway.", reply_markup=dev_menu())
+        except Exception as e:
+            await callback.message.answer(f"❌ Не удалось создать бэкап: <code>{html.escape(str(e)[:300])}</code>", reply_markup=dev_menu())
+    if action == "dev_admin_online":
+        groups = database.admin_known_group_ids(80)
+        admins = {}
+        checked = 0
+        for gid in groups:
+            try:
+                members = await bot.get_chat_administrators(gid)
+                checked += 1
+                for m in members:
+                    if getattr(m, "user", None) and not m.user.is_bot:
+                        admins[m.user.id] = (m.user.full_name, m.user.username)
+            except Exception:
+                continue
+        now = int(time.time())
+        recent = []
+        for uid, (name, username) in admins.items():
+            last_seen, last_chat, msg_count = database.admin_user_activity(uid)
+            age = now - last_seen if last_seen else 10**9
+            if age <= 6 * 3600:
+                recent.append((age, uid, name, username, msg_count))
+        recent.sort(key=lambda x: x[0])
+        lines = ["👮 <b>Активность администраторов</b>", "", "🟢 — активность ≤ 5 минут", "🟡 — активность ≤ 1 часа", "⚪ — активность сегодня", ""]
+        if not recent:
+            lines.append("Пока не вижу активности админов в известных группах.")
+        else:
+            for age, uid, name, username, msg_count in recent[:25]:
+                icon = "🟢" if age <= 300 else ("🟡" if age <= 3600 else "⚪")
+                who = f"@{html.escape(username)}" if username else html.escape(name)
+                when = "сейчас" if age < 60 else (f"{age//60} мин назад" if age < 3600 else f"{age//3600} ч назад")
+                lines.append(f"{icon} <b>{who}</b> · {when} · 💬 {msg_count}")
+        lines.append(f"\n🔎 Проверено групп: <b>{checked}</b>")
+        lines.append("\n<i>Это не точный Telegram-статус online: Bot API не раскрывает его. Здесь показывается последняя активность, которую видел бот.</i>")
+        await callback.message.answer("\n".join(lines), reply_markup=dev_menu())
+    elif action == "dev_admin_actions":
+        rows = database.admin_recent_actions_all(30)
+        lines = ["📜 <b>Последние действия администраторов</b>", ""]
+        if not rows:
+            lines.append("Действий пока нет.")
+        else:
+            for chat_id, admin_id, act, target_id, amount, details, created in rows:
+                dt = time.strftime("%d.%m %H:%M", time.localtime(created))
+                target = f" → <code>{target_id}</code>" if target_id else ""
+                extra = f" · {html.escape(details)}" if details else ""
+                amount_txt = f" · {amount}" if amount else ""
+                lines.append(f"🕐 {dt} · 👮 <code>{admin_id}</code> · {html.escape(act)}{target}{amount_txt}{extra} · чат <code>{chat_id}</code>")
+        await callback.message.answer("\n".join(lines), reply_markup=dev_menu())
+    elif action == "dev_economy":
+        s=database.admin_stats()
+        await callback.message.answer("📦 <b>Экономика проекта</b>\n\n"
+            f"💎 Сапов в кошельках: <b>{s['sapy']}</b>\n"
+            f"⭐ Stars: <b>{s['stars']}</b>\n"
+            f"💳 Платежей: <b>{s['payments']}</b>\n"
+            "🛡️ Лимит админов: <b>300 💎/нед.</b>\n\n"
+            "Сильные операции выполняются только через Developer Panel.", reply_markup=dev_menu())
+    elif action == "dev_user_lookup":
+        await state.set_state(AdminForm.USER_ID)
+        await callback.message.answer("🔎 Отправь Telegram ID пользователя для расширенной карточки.\n\nДля отмены: <code>отмена</code>")
+    elif action == "dev_sandbox":
+        await callback.message.answer("🧪 <b>Тестовый центр</b>\n\nБезопасные тесты: профиль, коллекция, уровень, мастерство и интерфейс.\n\n💡 Сильные операции с валютой и VIP здесь специально не выполняются автоматически — чтобы случайный клик не изменил экономику.",reply_markup=dev_menu())
+    elif action == "dev_global":
         name, rewards = database.get_global_season_config()
         await callback.message.answer(
             "🌐 <b>Настройка глобального сезона</b>\n\n"
@@ -452,7 +703,7 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
             f"👑 Активных VIP: <b>{s['vip']}</b>\n"
             f"⭐ Stars получено: <b>{s['stars']}</b>"
         )
-    elif action in ("admin_global_season", "admin_add_vip", "admin_remove_vip", "admin_payments", "admin_broadcast", "admin_remove_sapy"):
+    elif action in ("admin_global_season", "admin_add_sapy", "admin_remove_sapy", "admin_add_vip", "admin_remove_vip", "admin_payments", "admin_broadcast", "admin_remove_sapy"):
         await callback.message.answer("🔒 Эта функция доступна только в <code>/dev</code>.")
     elif action == "admin_user":
         await state.set_state(AdminForm.USER_ID)
@@ -505,6 +756,10 @@ async def admin_find_user(message: types.Message, state: FSMContext):
     vip = time.strftime("%d.%m.%Y %H:%M", time.localtime(vip_until)) if vip_until > int(time.time()) else "нет"
     await state.clear()
     title_line = f"Титул: <b>{html.escape(title)}</b>\n" if title else "Титул: <i>нет</i>\n"
+    lvl,cur,need,xp=database.get_level_progress(uid)
+    tcount,acount,icount=database.get_collection_stats(uid)
+    mastery=database.get_mastery(uid)
+    mastery_line = ", ".join(f"{k}: {lv}" for k,_xp,lv in mastery[:4]) if mastery else "пока нет"
     await message.answer(
         "👤 <b>Пользователь</b>\n\n"
         f"ID: <code>{uid}</code>\n"
@@ -512,7 +767,10 @@ async def admin_find_user(message: types.Message, state: FSMContext):
         f"{title_line}"
         f"💎 Сапы: <b>{premium[0]}</b>\n"
         f"👑 VIP до: <b>{vip}</b>\n"
-        f"👥 Пригласил: <b>{referrals}</b>"
+        f"👥 Пригласил: <b>{referrals}</b>\n"
+        f"⭐ Уровень: <b>{lvl}</b> · XP {cur}/{need}\n"
+        f"🧩 Коллекция: <b>{tcount}</b> титулов · <b>{acount}</b> достижений · <b>{icount}</b> предметов\n"
+        f"🏅 Мастерство: <b>{html.escape(mastery_line)}</b>"
     )
 
 @dp.message(AdminForm.SAPY_ACTION, F.chat.type == "private")
@@ -715,6 +973,45 @@ async def create_profile_callback(callback: types.CallbackQuery, state: FSMConte
     await callback.answer()
 
 
+COSMETIC_NAMES = {
+    "frame_neon": "🟣 Неон", "frame_gold": "🟠 Золото",
+    "badge_star": "⭐ Звезда", "badge_flame": "🔥 Огонь",
+    "effect_spark": "✨ Искры",
+}
+
+def profile_actions_keyboard(user_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏅 Достижения", callback_data="profile_achievements"),
+         InlineKeyboardButton(text="🏷️ Титулы", callback_data="profile_titles")],
+        [InlineKeyboardButton(text="🎒 Инвентарь", callback_data="profile_inventory"),
+         InlineKeyboardButton(text="🎨 Оформление", callback_data="profile_custom")],
+        [InlineKeyboardButton(text="🏛️ Зал славы", callback_data="hall_fame"),
+         InlineKeyboardButton(text="📚 Коллекция", callback_data="profile_collection")],
+        [InlineKeyboardButton(text="🏆 История сезонов", callback_data="profile_season_history"),
+         InlineKeyboardButton(text="🏅 Мастерство", callback_data="profile_mastery")],
+        [InlineKeyboardButton(text="🛍️ Магазин", callback_data="menu_shop")],
+    ])
+
+def profile_custom_keyboard(user_id):
+    inv = database.get_inventory(user_id)
+    rows = []
+    for item_id, name, _desc, item_type, _rarity, qty in inv:
+        if item_type in {"frame", "badge", "effect"}:
+            rows.append([InlineKeyboardButton(text=f"{name} ×{qty}", callback_data=f"equip:{item_type}:{item_id}")])
+    rows += [
+        [InlineKeyboardButton(text="🎨 Снять оформление", callback_data="equip_clear")],
+        [InlineKeyboardButton(text="⬅️ Профиль", callback_data="menu_profile")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def build_profile_actions_text(user_id):
+    title, frame, badge, effect = database.get_equipped_cosmetics(user_id)
+    parts = []
+    if frame: parts.append(f"🖼️ Рамка: <b>{html.escape(COSMETIC_NAMES.get(frame, frame))}</b>")
+    if badge: parts.append(f"🏅 Значок: <b>{html.escape(COSMETIC_NAMES.get(badge, badge))}</b>")
+    if effect: parts.append(f"✨ Эффект: <b>{html.escape(COSMETIC_NAMES.get(effect, effect))}</b>")
+    return "\n".join(parts) if parts else "Оформление пока не выбрано."
+
 def build_profile_text(target_user, chat_id=0):
     uid = target_user.id
     profile = database.get_profile(uid)
@@ -734,10 +1031,16 @@ def build_profile_text(target_user, chat_id=0):
 
     title = database.get_user_title(uid)
     title_line = f"🏷️ Титул: <b>{html.escape(title)}</b>\n" if title else ""
+    _equipped_title, frame, badge, effect = database.get_equipped_cosmetics(uid)
+    cosmetic_lines = []
+    if frame: cosmetic_lines.append(f"🖼️ Рамка: <b>{html.escape(COSMETIC_NAMES.get(frame, frame))}</b>")
+    if badge: cosmetic_lines.append(f"🏅 Значок: <b>{html.escape(COSMETIC_NAMES.get(badge, badge))}</b>")
+    if effect: cosmetic_lines.append(f"✨ Эффект: <b>{html.escape(COSMETIC_NAMES.get(effect, effect))}</b>")
     karma = database.get_karma(chat_id, uid) if chat_id else 0
     messages = database.get_user_messages(chat_id, uid) if chat_id else 0
     dice = database.get_user_dice_score(chat_id, uid) if chat_id else 0
     sapy = database.get_sapy(uid)
+    level,level_cur,level_need,total_xp = database.get_level_progress(uid)
     refs = database.get_referral_count(uid)
     first_seen = database.get_first_seen(uid)
     days_in_game = max(1, (int(time.time()) - first_seen) // 86400 + 1) if first_seen else 0
@@ -747,6 +1050,7 @@ def build_profile_text(target_user, chat_id=0):
         f"🔹 {html.escape(username)}",
         f"🪪 Имя профиля: <b>{html.escape(name)}</b>",
         title_line.rstrip(),
+        *(cosmetic_lines if cosmetic_lines else []),
         "",
         f"🎂 Возраст: <b>{age}</b>",
         f"🌆 Город: <b>{html.escape(city)}</b>",
@@ -758,6 +1062,7 @@ def build_profile_text(target_user, chat_id=0):
         f"🏆 Очки сезона: <b>{database.get_season_points(chat_id, uid) if chat_id else 0}</b>",
         "",
         f"💎 Сапы: <b>{sapy}</b>",
+        f"⭐ Уровень: <b>{level}</b> · XP {level_cur}/{level_need}",
         vip_line,
         f"👥 Рефералов: <b>{refs}</b>",
     ]
@@ -781,10 +1086,100 @@ async def menu_profile(callback: types.CallbackQuery):
         _name, _age, _city, _bio, photo_id = profile
         caption = build_profile_text(callback.from_user, 0)
         if photo_id:
-            await callback.message.answer_photo(photo_id, caption=caption)
+            await callback.message.answer_photo(photo_id, caption=caption, reply_markup=profile_actions_keyboard(callback.from_user.id))
         else:
-            await callback.message.answer(caption)
+            await callback.message.answer(caption, reply_markup=profile_actions_keyboard(callback.from_user.id))
     await callback.answer()
+
+@dp.callback_query(F.data == "profile_achievements")
+async def profile_achievements(callback: types.CallbackQuery):
+    rows = database.get_achievements(callback.from_user.id)
+    lines=["🏅 <b>Достижения</b>", ""]
+    if not rows: lines.append("Пока ничего нет — играй, общайся и выполняй задания! 🚀")
+    for _aid,title,desc,rarity,_at in rows:
+        lines.append(f"{rarity_text(rarity)} <b>{html.escape(title)}</b>\n└ {html.escape(desc)}")
+    await callback.message.answer("\n".join(lines), reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_titles")
+async def profile_titles(callback: types.CallbackQuery):
+    titles=database.get_user_titles(callback.from_user.id)
+    season_titles=database.get_season_achievements(callback.from_user.id)
+    lines=[f"🏷️ <b>Коллекция титулов</b> · {len(titles)}", ""]
+    if titles:
+        lines += [f"• {html.escape(t)}" for t in titles]
+    else: lines.append("Титулов пока нет.")
+    if season_titles:
+        lines += ["", "🏆 <b>Сезонные титулы</b>"]
+        for season,place,title in season_titles[:10]: lines.append(f"• {html.escape(title)} · {season} · #{place}")
+    await callback.message.answer("\n".join(lines), reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_inventory")
+async def profile_inventory(callback: types.CallbackQuery):
+    inv=database.get_inventory(callback.from_user.id)
+    lines=["🎒 <b>Инвентарь</b>", ""]
+    if not inv: lines.append("Инвентарь пуст. Загляни в магазин 🛍️")
+    else:
+        for item_id,name,desc,item_type,rarity,qty in inv:
+            lines.append(f"{rarity_text(rarity)} <b>{html.escape(name)}</b> ×{qty}")
+    await callback.message.answer("\n".join(lines), reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_custom")
+async def profile_custom(callback: types.CallbackQuery):
+    await callback.message.answer("🎨 <b>Оформление профиля</b>\n\nВыбери только то, что уже есть у тебя в инвентаре.\n\n"+build_profile_actions_text(callback.from_user.id), reply_markup=profile_custom_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data.startswith("equip:"))
+async def equip_cosmetic(callback: types.CallbackQuery):
+    _,kind,item_id=callback.data.split(":",2)
+    ok=database.set_cosmetic(callback.from_user.id,kind,item_id)
+    await callback.answer("✅ Оформление применено!" if ok else "❌ Этого предмета нет в инвентаре.", show_alert=True)
+    if ok:
+        await callback.message.edit_text("🎨 <b>Оформление профиля</b>\n\n"+build_profile_actions_text(callback.from_user.id), reply_markup=profile_custom_keyboard(callback.from_user.id))
+
+@dp.callback_query(F.data == "equip_clear")
+async def equip_clear(callback: types.CallbackQuery):
+    for kind in ("frame","badge","effect"): database.clear_cosmetic(callback.from_user.id,kind)
+    await callback.message.edit_text("🎨 <b>Оформление профиля</b>\n\nОформление снято.", reply_markup=profile_custom_keyboard(callback.from_user.id)); await callback.answer("Готово")
+
+@dp.callback_query(F.data == "hall_fame")
+async def hall_fame(callback: types.CallbackQuery):
+    rows=database.get_hall_of_fame(30)
+    lines=["🏛️ <b>Зал славы Sapronem</b>", ""]
+    if not rows: lines.append("Пока история победителей пуста.")
+    else:
+        current=None
+        for season,place,uid,title in rows:
+            if season!=current:
+                current=season; lines.append(f"\n🏆 <b>{season}</b>")
+            display=database.get_display_name(uid,"Игрок")
+            lines.append(f"#{place} · {html.escape(display)} · {html.escape(title)}")
+    await callback.message.answer("\n".join(lines), reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_collection")
+async def profile_collection(callback: types.CallbackQuery):
+    uid=callback.from_user.id; titles,ach,items=database.get_collection_stats(uid)
+    inv=database.get_inventory(uid); equipped=database.get_equipped_cosmetics(uid)
+    lines=["📚 <b>Коллекция</b>","",f"🏷️ Титулы: <b>{titles}</b>",f"🏅 Достижения: <b>{ach}</b>",f"🎨 Предметы: <b>{items}</b>",""]
+    if inv:
+        lines.append("🎨 <b>Косметика</b>")
+        for iid,name,desc,typ,rarity,qty in inv:
+            if typ in {"frame","badge","effect"}: lines.append(f"{rarity_text(rarity)} {html.escape(name)} ×{qty}")
+    await callback.message.answer("\n".join(lines),reply_markup=profile_actions_keyboard(uid)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_season_history")
+async def profile_season_history(callback: types.CallbackQuery):
+    rows=database.get_season_history(callback.from_user.id); lines=["🏆 <b>История сезонов</b>",""]
+    if not rows: lines.append("Ты ещё не занимал призовых мест в сезонах.")
+    for season,place,title in rows:
+        lines.append(f"🏆 <b>{season}</b> · #{place} · {html.escape(title)}")
+    await callback.message.answer("\n".join(lines),reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == "profile_mastery")
+async def profile_mastery(callback: types.CallbackQuery):
+    rows=database.get_mastery(callback.from_user.id); lines=["🏅 <b>Мастерство</b>",""]
+    if not rows: lines.append("Пока нет уровней мастерства. Играй, выполняй задания и развивай ферму!")
+    for skill,xp,level in rows:
+        lines.append(f"• <b>{html.escape(skill)}</b> — уровень {level} · {xp} XP")
+    await callback.message.answer("\n".join(lines),reply_markup=profile_actions_keyboard(callback.from_user.id)); await callback.answer()
 
 @dp.callback_query(F.data == "menu_help")
 async def menu_help(callback: types.CallbackQuery):
@@ -1045,6 +1440,7 @@ async def send_daily_bonus(message: types.Message, user: types.User):
     claimed, seconds_left = database.claim_daily_bonus(chat_id, user_id, amount=daily_amount)
     if claimed:
         database.progress_daily_quest(chat_id, user_id, "bonus", 1)
+        database.progress_weekly_quest(chat_id, user_id, "bonus", 1)
 
     extra = ""
 
@@ -1158,7 +1554,10 @@ async def handle_messages(message: types.Message):
         event_id, _, _ = database.current_event()
         season_gain = 2 if event_id == "social" else 1
         database.add_season_points(chat_id, user_id, season_gain)
+        database.add_player_xp(user_id, 3 if event_id != "social" else 5)
+        database.add_mastery_xp(user_id, "Общение", 3)
         database.progress_daily_quest(chat_id, user_id, "messages", 1)
+        database.progress_weekly_quest(chat_id, user_id, "messages", 1)
         newly_achievements = database.evaluate_achievements(user_id, chat_id)
         if newly_achievements:
             for _aid, ach_title, ach_desc, rarity in newly_achievements:
@@ -1295,6 +1694,7 @@ async def handle_messages(message: types.Message):
         database.update_dice(chat_id, user_id, user_name, score)
         database.add_season_points(chat_id, user_id, 5)
         database.progress_daily_quest(chat_id, user_id, "dice", 1)
+        database.progress_weekly_quest(chat_id, user_id, "dice", 1)
         mention = f'<a href="tg://user?id={user_id}">{user_name}</a>'
         await message.reply(f"🎲 {mention}, выпало число <b>{score}</b>!\nСтатистика обновлена.")
         return
@@ -1306,6 +1706,63 @@ async def handle_messages(message: types.Message):
         await message.answer(top.build_top_dice_text(chat_id))
         return
 
+    # 10.5. ПРОФИЛЬ / ИНВЕНТАРЬ / ОФОРМЛЕНИЕ / ЗАЛ СЛАВЫ
+    if text in ["инвентарь", "инвентарь", "рюкзак"]:
+        inv=database.get_inventory(user_id)
+        lines=["🎒 <b>Твой инвентарь</b>", ""]
+        if not inv: lines.append("Пока пусто. Загляни в магазин 🛍️")
+        for item_id,name,desc,item_type,rarity,qty in inv:
+            lines.append(f"{rarity_text(rarity)} <b>{html.escape(name)}</b> ×{qty}")
+        await message.answer("\n".join(lines)); return
+
+    if text in ["титулы", "мои титулы"]:
+        titles=database.get_user_titles(user_id); lines=[f"🏷️ <b>Твои титулы</b> · {len(titles)}", ""]
+        lines += [f"• {html.escape(t)}" for t in titles] or ["Титулов пока нет."]
+        await message.answer("\n".join(lines)); return
+
+    if text in ["оформление", "оформление профиля"]:
+        await message.answer("🎨 <b>Оформление профиля</b>\n\n"+build_profile_actions_text(user_id), reply_markup=profile_custom_keyboard(user_id)); return
+
+    if text in ["зал славы", "слава"]:
+        rows=database.get_hall_of_fame(30); lines=["🏛️ <b>Зал славы Sapronem</b>", ""]
+        if not rows: lines.append("Пока история победителей пуста.")
+        current=None
+        for season,place,uid,title in rows:
+            if season!=current: current=season; lines.append(f"\n🏆 <b>{season}</b>")
+            lines.append(f"#{place} · {html.escape(database.get_display_name(uid,'Игрок'))} · {html.escape(title)}")
+        await message.answer("\n".join(lines)); return
+
+    if text in ["профиль", "мой профиль", "анкета"] and message.chat.type == "private":
+        profile=database.get_profile(user_id)
+        if profile:
+            caption=build_profile_text(message.from_user,0); photo_id=profile[4]
+            if photo_id: await message.answer_photo(photo_id,caption=caption,reply_markup=profile_actions_keyboard(user_id))
+            else: await message.answer(caption,reply_markup=profile_actions_keyboard(user_id))
+        else: await message.answer("❌ Профиль ещё не создан. Напиши <code>заполнить анкету</code>.")
+        return
+
+    # 10.6. УЛУЧШЕННЫЕ ЗАДАНИЯ
+    if text in ["задание", "задания"] and message.chat.type in ["group","supergroup"]:
+        q=database.get_daily_quest(chat_id,user_id); w=database.get_weekly_quest(chat_id,user_id)
+        await message.answer(f"📜 <b>Задания</b>\n\n☀️ <b>Сегодня</b>\n{q['title']}\nПрогресс: <b>{q['progress']}/{q['target']}</b>\n🎁 75 🪙 + 8 💎\n\n📅 <b>На неделю</b>\n{w['title']}\nПрогресс: <b>{w['progress']}/{w['target']}</b>\n🎁 300 🪙 + 25 💎\n\nЗабрать: <code>задание забрать</code> или <code>недельное задание забрать</code>"); return
+
+    if text == "недельное задание забрать" and message.chat.type in ["group","supergroup"]:
+        ok,q,coins,sapy=database.claim_weekly_quest(chat_id,user_id)
+        if not ok: await message.answer("⏳ Недельное задание ещё не выполнено или награда уже забрана.")
+        else: await message.answer(f"🎉 <b>Недельное задание выполнено!</b>\n\n+300 🪙\n+25 💎\n\nБаланс: <b>{sapy} 💎</b>")
+        return
+
+    if text in ["сундук", "сундуки"]:
+        inv=[x for x in database.get_inventory(user_id) if x[3]=="chest"]
+        if not inv: await message.answer("🎁 У тебя нет сундуков. Загляни в магазин."); return
+        lines=["🎁 <b>Твои сундуки</b>", ""]
+        for item_id,name,desc,typ,rarity,qty in inv: lines.append(f"{rarity_text(rarity)} {html.escape(name)} ×{qty} — <code>открыть {item_id}</code>")
+        await message.answer("\n".join(lines)); return
+
+    if text.startswith("открыть "):
+        item_id=text.split(maxsplit=1)[1].strip(); ok,result,_=database.open_chest(user_id,item_id)
+        await message.answer(("🎁 <b>Сундук открыт!</b>\n\n"+result) if ok else "❌ "+result); return
+
     # 11. ДОСТИЖЕНИЯ И НАГРАДЫ
     if text in ["достижения", "ачивки", "ачивки"]:
         rows = database.get_achievements(user_id)
@@ -1314,7 +1771,7 @@ async def handle_messages(message: types.Message):
             lines.append("Пока нет достижений. Играй, общайся и развивайся! 🚀")
         else:
             for _aid, title, desc, rarity, _at in rows:
-                lines.append(f"{'⭐' * rarity} <b>{html.escape(title)}</b> — редкость {rarity}/5")
+                lines.append(f"{rarity_text(rarity)} <b>{html.escape(title)}</b>")
                 lines.append(f"└ {html.escape(desc)}")
             lines += ["", f"🏅 Получено: <b>{len(rows)}</b>"]
         await message.answer("\n".join(lines))
@@ -1353,7 +1810,7 @@ async def handle_messages(message: types.Message):
         if not arg:
             lines=["🎁 <b>Награды группы</b>", "", "Формат: <code>награда НОМЕР</code>", ""]
             for i,(rarity,name,desc) in enumerate(AWARD_DEFS,1):
-                lines.append(f"<code>{i}</code>. {'⭐'*rarity} <b>{html.escape(name)}</b> — {html.escape(desc)}")
+                lines.append(f"<code>{i}</code>. {rarity_text(rarity)} · <b>{html.escape(name)}</b> — {html.escape(desc)}")
             await message.reply("\n".join(lines))
             return
         if not arg.isdigit() or not (1 <= int(arg) <= len(AWARD_DEFS)):
@@ -1547,6 +2004,69 @@ async def handle_messages(message: types.Message):
         await message.answer(f"{result}\n\n🎁 Подарок отправлен: <b>{target_name}</b>")
         return
 
+    # 12.9. УРОВЕНЬ / КОЛЛЕКЦИЯ / МАСТЕРСТВО
+    if text in ["уровень", "уровень игрока", "xp"]:
+        level,cur,need,total=database.get_level_progress(user_id)
+        filled=min(10, int(cur/need*10)) if need else 10
+        await message.answer(f"⭐ <b>Уровень {level}</b>\n\n{'▰'*filled}{'▱'*(10-filled)}\n<b>{cur}/{need} XP</b>\n\nXP даётся за сообщения, задания, события, ферму и достижения.")
+        return
+    if text in ["мастерство", "навыки"]:
+        rows=database.get_mastery(user_id); lines=["🏅 <b>Мастерство</b>",""]
+        for skill,xp,level in rows: lines.append(f"• <b>{html.escape(skill)}</b> — {level} ур. · {xp} XP")
+        if len(lines)==2: lines.append("Пока нет навыков. Начни играть!")
+        await message.answer("\n".join(lines)); return
+    if text in ["коллекция", "моя коллекция"]:
+        t,a,i=database.get_collection_stats(user_id); await message.answer(f"📚 <b>Коллекция</b>\n\n🏷️ Титулы: <b>{t}</b>\n🏅 Достижения: <b>{a}</b>\n🎨 Предметы: <b>{i}</b>"); return
+    if text in ["история сезонов", "история сезона"]:
+        rows=database.get_season_history(user_id); lines=["🏆 <b>История сезонов</b>",""]
+        if not rows: lines.append("Пока нет призовых мест.")
+        for season,place,title in rows: lines.append(f"🏆 {season} · #{place} · {html.escape(title)}")
+        await message.answer("\n".join(lines)); return
+
+    # 12.95. ВЗАИМОДЕЙСТВИЯ
+    if text in ["лайк", "+лайк"]:
+        if message.chat.type not in ["group","supergroup"] or not message.reply_to_message:
+            await message.answer("❤️ Ответь командой <code>лайк</code> на сообщение игрока."); return
+        target=message.reply_to_message.from_user
+        ok,count=database.like_player(chat_id,user_id,target.id)
+        await message.answer(("❤️ Лайк поставлен!" if ok else "❤️ Ты уже ставил этому игроку лайк.")+f"\nВсего лайков: <b>{count}</b>"); return
+    if text in ["лайки", "мои лайки"]:
+        count=database.get_like_count(chat_id,user_id) if message.chat.type in ["group","supergroup"] else 0
+        await message.answer(f"❤️ У тебя <b>{count}</b> лайков в этой группе."); return
+
+    # 12.96. ПОДАРОК ПРЕДМЕТА
+    if text.startswith("подарить ") and message.chat.type in ["group","supergroup"]:
+        if not message.reply_to_message:
+            await message.answer("🎁 Ответь на сообщение игрока: <code>подарить frame_neon</code>"); return
+        item_id=text.split(maxsplit=1)[1].strip(); target=message.reply_to_message.from_user
+        ok,result=database.gift_inventory_item(user_id,target.id,item_id)
+        await message.answer((f"🎁 Подарок отправлен: <b>{html.escape(result)}</b>" if ok else f"❌ {html.escape(result)}")); return
+
+    # 12.97. МИНИ-ИГРЫ
+    if text.startswith("реакция"):
+        if message.chat.type not in ["group","supergroup"]: return
+        started=time.time(); await asyncio.sleep(random.uniform(0.25,0.8)); await message.answer("⚡ ЖМИ: <code>жми</code>");
+        database.add_player_xp(user_id, 5)
+        return
+    if text in ["жми", "мишень"]:
+        if message.chat.type not in ["group","supergroup"]: return
+        database.ensure_economy_user(chat_id,user_id); database.add_coins(chat_id,user_id,random.randint(5,15)); database.add_player_xp(user_id,10); database.add_mastery_xp(user_id,"Мини-игры",10)
+        await message.answer("🎯 Попадание! +монеты и XP."); return
+    if text.startswith("викторина"):
+        if message.chat.type not in ["group","supergroup"]: return
+        questions=[("Столица Франции?","париж"),("Сколько дней в неделе?","7"),("Какой символ у сапов?","💎")]
+        q,a=random.choice(questions); pending_quizzes[(chat_id,user_id)]=(a,time.time())
+        await message.answer(f"🧠 <b>Викторина</b>\n\n{q}\nОтветь следующим сообщением!")
+        return
+    if (chat_id,user_id) in pending_quizzes and message.chat.type in ["group","supergroup"]:
+        answer=pending_quizzes.pop((chat_id,user_id))[0]
+        if text==answer.lower():
+            database.ensure_economy_user(chat_id,user_id); database.add_coins(chat_id,user_id,25); database.add_player_xp(user_id,20); database.add_mastery_xp(user_id,"Мини-игры",20)
+            await message.answer("🧠 <b>Правильно!</b> +25 🪙 и +20 XP")
+        else:
+            await message.answer("❌ Неправильно. Повезёт в следующий раз!")
+        return
+
     # 13. ОГРАНИЧЕНИЕ ЛС
     # Всё, что ниже (топ, ферма, варны, модерация, карма, РП, триггеры) —
     # только для групп. Этот блок обязательно должен идти отдельным
@@ -1579,7 +2099,9 @@ async def handle_messages(message: types.Message):
             else:
                 await message.answer(f"⏳ Задание ещё не выполнено: <b>{q['progress']}/{q['target']}</b>.")
             return
-        await message.answer(f"🎉 <b>Ежедневное задание выполнено!</b>\n\n+50 🪙\n+5 💎\n\nБаланс: <b>{sapy_total} 💎</b>")
+        database.add_player_xp(user_id, 20)
+        database.add_mastery_xp(user_id, "Задания", 15)
+        await message.answer(f"🎉 <b>Ежедневное задание выполнено!</b>\n\n+75 🪙\n+8 💎\n\nБаланс: <b>{sapy_total} 💎</b>")
         return
 
     if text in ["сезон", "сезоны", "рейтинг сезона"]:
@@ -1636,7 +2158,10 @@ async def handle_messages(message: types.Message):
         success, reply_text = farm.harvest(chat_id, user_id, reward_multiplier=multiplier)
         if success:
             database.progress_daily_quest(chat_id, user_id, "harvest", 1)
+            database.progress_weekly_quest(chat_id, user_id, "harvest", 1)
             database.add_season_points(chat_id, user_id, 10)
+            database.add_player_xp(user_id, 12)
+            database.add_mastery_xp(user_id, "Ферма", 10)
         await message.reply(reply_text)
         return
 

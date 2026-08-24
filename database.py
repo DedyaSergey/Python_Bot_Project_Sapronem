@@ -151,6 +151,17 @@ def init_db():
     )
     """)
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS weekly_quests (
+        chat_id INTEGER,
+        user_id INTEGER,
+        week_key TEXT,
+        quest_type TEXT,
+        progress INTEGER DEFAULT 0,
+        claimed INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id, week_key)
+    )
+    """)
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS season_points (
         season_id TEXT,
         chat_id INTEGER,
@@ -309,9 +320,46 @@ def claim_daily_quest(chat_id, user_id):
         return False, q, get_coins(chat_id,user_id), get_sapy(user_id)
     cursor.execute("UPDATE daily_quests SET claimed=1 WHERE chat_id=? AND user_id=? AND day_key=?", (chat_id,user_id,q["day"]))
     conn.commit()
-    coins = add_coins(chat_id,user_id,50)
-    sapy = add_sapy(user_id,5)
+    coins = add_coins(chat_id,user_id,75)
+    sapy = add_sapy(user_id,8)
     return True, q, coins, sapy
+
+
+def current_week_key():
+    return time.strftime("%G-W%V", time.localtime())
+
+def _weekly_quest_for_week(week_key=None):
+    week_key = week_key or current_week_key()
+    seed = sum(ord(c) for c in week_key)
+    quests = [
+        ("messages", 100, "💬 Напиши 100 сообщений"),
+        ("dice", 10, "🎲 Сыграй в кубы 10 раз"),
+        ("harvest", 7, "🌾 Собери урожай 7 раз"),
+    ]
+    return quests[seed % len(quests)]
+
+def get_weekly_quest(chat_id,user_id):
+    week=current_week_key(); qtype,target,title=_weekly_quest_for_week(week)
+    cursor.execute("SELECT progress,claimed FROM weekly_quests WHERE chat_id=? AND user_id=? AND week_key=?",(chat_id,user_id,week))
+    row=cursor.fetchone()
+    if row is None:
+        cursor.execute("INSERT INTO weekly_quests(chat_id,user_id,week_key,quest_type,progress,claimed) VALUES(?,?,?,?,0,0)",(chat_id,user_id,week,qtype)); conn.commit(); progress=claimed=0
+    else: progress,claimed=row
+    return {"type":qtype,"target":target,"title":title,"progress":min(progress,target),"claimed":bool(claimed),"week":week}
+
+def progress_weekly_quest(chat_id,user_id,quest_type,amount=1):
+    q=get_weekly_quest(chat_id,user_id)
+    if q["type"]!=quest_type or q["claimed"]: return q,False
+    new=min(q["target"],q["progress"]+amount)
+    cursor.execute("UPDATE weekly_quests SET progress=? WHERE chat_id=? AND user_id=? AND week_key=?",(new,chat_id,user_id,q["week"])); conn.commit(); q["progress"]=new
+    return q,new>=q["target"]
+
+def claim_weekly_quest(chat_id,user_id):
+    q=get_weekly_quest(chat_id,user_id)
+    if q["claimed"] or q["progress"]<q["target"]: return False,q,get_coins(chat_id,user_id),get_sapy(user_id)
+    cursor.execute("UPDATE weekly_quests SET claimed=1 WHERE chat_id=? AND user_id=? AND week_key=?",(chat_id,user_id,q["week"])); conn.commit()
+    coins=add_coins(chat_id,user_id,300); sapy=add_sapy(user_id,25)
+    return True,q,coins,sapy
 
 def is_global_season_enabled():
     cursor.execute("SELECT enabled FROM global_season_config WHERE id=1")
@@ -930,9 +978,14 @@ def init_shop_db():
         name TEXT NOT NULL,
         description TEXT NOT NULL,
         price INTEGER NOT NULL,
-        item_type TEXT NOT NULL
+        item_type TEXT NOT NULL,
+        rarity INTEGER DEFAULT 1
     )
     """)
+    try:
+        cursor.execute("ALTER TABLE shop_items ADD COLUMN rarity INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_inventory (
         user_id INTEGER,
@@ -944,9 +997,17 @@ def init_shop_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_cosmetics (
         user_id INTEGER PRIMARY KEY,
-        title TEXT
+        title TEXT,
+        frame TEXT,
+        badge TEXT,
+        effect TEXT
     )
     """)
+    for _col, _typ in (("frame", "TEXT"), ("badge", "TEXT"), ("effect", "TEXT")):
+        try:
+            cursor.execute(f"ALTER TABLE user_cosmetics ADD COLUMN {_col} {_typ}")
+        except sqlite3.OperationalError:
+            pass
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS achievements (
         user_id INTEGER,
@@ -985,15 +1046,22 @@ def init_shop_db():
     # Переносим уже купленные старые титулы в коллекцию титулов.
     cursor.execute("INSERT OR IGNORE INTO user_titles(user_id, title) SELECT user_id, title FROM user_cosmetics WHERE title IS NOT NULL AND title != ''")
     items = [
-        ("title_star", "🌟 Титул «Звезда»", "Показывается в профиле.", 50, "title"),
-        ("title_farmer", "🌾 Титул «Фермер»", "Показывается в профиле.", 75, "title"),
-        ("vip_30", "👑 VIP на 30 дней", "+1 грядка, увеличенный ежедневный бонус и VIP-статус.", 100, "vip"),
-        ("vip_90", "👑 VIP на 90 дней", "VIP сразу на 3 месяца.", 250, "vip"),
-        ("gift_pack", "🎁 Подарочный набор", "Одноразовый набор: можно подарить другу 25 💎.", 30, "gift"),
+        ("title_star", "🌟 Титул «Звезда»", "Показывается в профиле.", 50, "title", 2),
+        ("title_farmer", "🌾 Титул «Фермер»", "Показывается в профиле.", 75, "title", 2),
+        ("vip_30", "👑 VIP на 30 дней", "+1 грядка, увеличенный ежедневный бонус и VIP-статус.", 100, "vip", 3),
+        ("vip_90", "👑 VIP на 90 дней", "VIP сразу на 3 месяца.", 250, "vip", 4),
+        ("gift_pack", "🎁 Подарочный набор", "Одноразовый набор: можно подарить другу 25 💎.", 30, "gift", 1),
+        ("frame_neon", "🟣 Рамка «Неон»", "Косметическая рамка профиля.", 120, "frame", 3),
+        ("frame_gold", "🟠 Рамка «Золото»", "Косметическая рамка профиля.", 220, "frame", 4),
+        ("badge_star", "⭐ Значок «Звезда»", "Значок рядом с именем.", 90, "badge", 2),
+        ("badge_flame", "🔥 Значок «Огонь»", "Значок активности.", 160, "badge", 3),
+        ("effect_spark", "✨ Эффект «Искры»", "Косметический эффект профиля.", 180, "effect", 3),
+        ("chest_basic", "🎁 Малый сундук", "Содержит приятную случайную награду.", 150, "chest", 3),
+        ("chest_epic", "🟣 Эпический сундук", "Более редкая случайная награда.", 350, "chest", 4),
     ]
     cursor.executemany("""
-    INSERT OR IGNORE INTO shop_items(item_id, name, description, price, item_type)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO shop_items(item_id, name, description, price, item_type, rarity)
+    VALUES (?, ?, ?, ?, ?, ?)
     """, items)
     conn.commit()
 
@@ -1092,6 +1160,71 @@ def get_inventory_quantity(user_id, item_id):
     return row[0] if row else 0
 
 
+def get_inventory(user_id):
+    cursor.execute("""
+    SELECT i.item_id, i.name, i.description, i.item_type, i.rarity, u.quantity
+    FROM user_inventory u JOIN shop_items i ON i.item_id=u.item_id
+    WHERE u.user_id=? AND u.quantity>0 ORDER BY i.rarity DESC, i.name
+    """, (user_id,))
+    return cursor.fetchall()
+
+def get_equipped_cosmetics(user_id):
+    cursor.execute("SELECT title, frame, badge, effect FROM user_cosmetics WHERE user_id=?", (user_id,))
+    return cursor.fetchone() or (None, None, None, None)
+
+def set_cosmetic(user_id, kind, item_id):
+    if kind not in {"frame", "badge", "effect"}:
+        return False
+    if get_inventory_quantity(user_id, item_id) < 1:
+        return False
+    cursor.execute(f"INSERT INTO user_cosmetics(user_id,{kind}) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET {kind}=excluded.{kind}", (user_id,item_id))
+    conn.commit()
+    return True
+
+def clear_cosmetic(user_id, kind):
+    if kind not in {"frame", "badge", "effect"}:
+        return False
+    cursor.execute(f"UPDATE user_cosmetics SET {kind}=NULL WHERE user_id=?", (user_id,))
+    conn.commit()
+    return True
+
+def get_shop_item(item_id):
+    cursor.execute("SELECT item_id,name,description,price,item_type,rarity FROM shop_items WHERE item_id=?", (item_id,))
+    return cursor.fetchone()
+
+def open_chest(user_id, item_id):
+    import random
+    if item_id not in {"chest_basic", "chest_epic"} or get_inventory_quantity(user_id,item_id)<1:
+        return False, "У тебя нет такого сундука.", None
+    cursor.execute("UPDATE user_inventory SET quantity=quantity-1 WHERE user_id=? AND item_id=? AND quantity>0", (user_id,item_id))
+    epic = item_id == "chest_epic"
+    pool = [
+        ("coins", 150 if not epic else 350, "🪙 Монеты"),
+        ("sapy", 8 if not epic else 20, "💎 Сапы"),
+        ("item", "badge_star" if not epic else "badge_flame", "🎖️ Косметика"),
+        ("title", "✨ Искра удачи" if not epic else "🌌 Хранитель звёзд", "🏷️ Титул"),
+    ]
+    kind, value, label = random.choices(pool, weights=[45,30,20,5], k=1)[0]
+    if kind == "coins":
+        add_coins(0,user_id,value)
+        result = f"{label}: +{value}"
+    elif kind == "sapy":
+        add_sapy(user_id,value)
+        result = f"{label}: +{value}"
+    elif kind == "item":
+        cursor.execute("INSERT INTO user_inventory(user_id,item_id,quantity) VALUES(?,?,1) ON CONFLICT(user_id,item_id) DO UPDATE SET quantity=quantity+1", (user_id,value))
+        result = f"{label}: {get_shop_item(value)[1]}"
+    else:
+        grant_title(user_id,value,equip=False)
+        result = f"{label}: <b>{value}</b>"
+    conn.commit()
+    return True, result, kind
+
+def get_hall_of_fame(limit=30):
+    cursor.execute("""SELECT season_id, place, user_id, title FROM season_achievements ORDER BY season_id DESC, place ASC LIMIT ?""", (limit,))
+    return cursor.fetchall()
+
+
 def use_gift_pack(user_id, target_id):
     if target_id == user_id:
         return False, "Нельзя подарить набор самому себе."
@@ -1102,6 +1235,108 @@ def use_gift_pack(user_id, target_id):
     conn.commit()
     return True, "🎁 Друг получил 25 💎 сапов!"
 
+
+
+# --- 1.18: прогресс игрока, мастерство, взаимодействия, подарки ---
+def init_player_systems():
+    cursor.execute("""CREATE TABLE IF NOT EXISTS player_progress (
+        user_id INTEGER PRIMARY KEY, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS mastery (
+        user_id INTEGER, skill TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
+        PRIMARY KEY(user_id, skill)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS player_gifts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, from_user_id INTEGER, to_user_id INTEGER,
+        item_id TEXT, quantity INTEGER DEFAULT 1, created_at INTEGER NOT NULL
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS player_likes (
+        chat_id INTEGER, from_user_id INTEGER, to_user_id INTEGER, created_at INTEGER NOT NULL,
+        PRIMARY KEY(chat_id, from_user_id, to_user_id)
+    )""")
+    conn.commit()
+
+def _level_for_xp(xp):
+    level=1
+    need=250
+    total=0
+    while xp >= total + need and level < 100:
+        total += need
+        level += 1
+        need = 250 + (level-1)*100
+    return level
+
+def add_player_xp(user_id, amount, reason=''):
+    if amount <= 0: return _get_player_progress(user_id)
+    old=_get_player_progress(user_id)
+    xp=old[0]+int(amount)
+    level=_level_for_xp(xp)
+    cursor.execute("INSERT INTO player_progress(user_id,xp,level) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET xp=excluded.xp,level=excluded.level",(user_id,xp,level))
+    conn.commit()
+    return xp, level, level-old[1]
+
+def _get_player_progress(user_id):
+    cursor.execute("SELECT xp,level FROM player_progress WHERE user_id=?",(user_id,))
+    row=cursor.fetchone()
+    if row: return row
+    cursor.execute("INSERT OR IGNORE INTO player_progress(user_id,xp,level) VALUES(?,?,?)",(user_id,0,1)); conn.commit()
+    return (0,1)
+
+def get_player_progress(user_id):
+    return _get_player_progress(user_id)
+
+def get_level_progress(user_id):
+    xp,level=_get_player_progress(user_id)
+    base=0
+    for lv in range(1,level): base += 250 + (lv-1)*100
+    need=250+(level-1)*100
+    return level, max(0,xp-base), need, xp
+
+def add_mastery_xp(user_id, skill, amount):
+    cursor.execute("SELECT xp,level FROM mastery WHERE user_id=? AND skill=?",(user_id,skill))
+    row=cursor.fetchone() or (0,1)
+    xp=row[0]+max(0,int(amount)); level=_level_for_xp(xp)
+    cursor.execute("INSERT INTO mastery(user_id,skill,xp,level) VALUES(?,?,?,?) ON CONFLICT(user_id,skill) DO UPDATE SET xp=excluded.xp,level=excluded.level",(user_id,skill,xp,level)); conn.commit()
+    return xp,level,level-row[1]
+
+def get_mastery(user_id):
+    cursor.execute("SELECT skill,xp,level FROM mastery WHERE user_id=? ORDER BY level DESC,xp DESC",(user_id,)); return cursor.fetchall()
+
+def get_collection_stats(user_id):
+    cursor.execute("SELECT COUNT(*) FROM user_titles WHERE user_id=?",(user_id,)); titles=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM achievements WHERE user_id=?",(user_id,)); ach=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(DISTINCT item_id) FROM user_inventory WHERE user_id=? AND quantity>0",(user_id,)); items=cursor.fetchone()[0]
+    return titles,ach,items
+
+def like_player(chat_id, from_user_id, to_user_id):
+    if from_user_id==to_user_id: return False,0
+    cursor.execute("SELECT 1 FROM player_likes WHERE chat_id=? AND from_user_id=? AND to_user_id=?",(chat_id,from_user_id,to_user_id))
+    if cursor.fetchone():
+        return False,get_like_count(chat_id,to_user_id)
+    cursor.execute("INSERT INTO player_likes(chat_id,from_user_id,to_user_id,created_at) VALUES(?,?,?,?)",(chat_id,from_user_id,to_user_id,int(time.time())))
+    conn.commit(); return True,get_like_count(chat_id,to_user_id)
+
+def get_like_count(chat_id,to_user_id):
+    cursor.execute("SELECT COUNT(*) FROM player_likes WHERE chat_id=? AND to_user_id=?",(chat_id,to_user_id)); return cursor.fetchone()[0]
+
+def gift_inventory_item(from_user_id,to_user_id,item_id):
+    if from_user_id==to_user_id: return False,'Нельзя подарить предмет самому себе.'
+    qty=get_inventory_quantity(from_user_id,item_id)
+    if qty<1: return False,'У тебя нет этого предмета.'
+    item=get_shop_item(item_id)
+    if not item: return False,'Предмет не найден.'
+    cursor.execute("UPDATE user_inventory SET quantity=quantity-1 WHERE user_id=? AND item_id=? AND quantity>0",(from_user_id,item_id))
+    cursor.execute("INSERT INTO user_inventory(user_id,item_id,quantity) VALUES(?,?,1) ON CONFLICT(user_id,item_id) DO UPDATE SET quantity=quantity+1",(to_user_id,item_id))
+    cursor.execute("INSERT INTO player_gifts(from_user_id,to_user_id,item_id,quantity,created_at) VALUES(?,?,?,?,?)",(from_user_id,to_user_id,item_id,1,int(time.time())))
+    conn.commit(); return True,item[1]
+
+def get_gift_history(user_id,limit=10):
+    cursor.execute("SELECT from_user_id,to_user_id,item_id,quantity,created_at FROM player_gifts WHERE from_user_id=? OR to_user_id=? ORDER BY id DESC LIMIT ?",(user_id,user_id,limit)); return cursor.fetchall()
+
+def get_season_history(user_id,limit=20):
+    cursor.execute("SELECT season_id,place,title FROM season_achievements WHERE user_id=? ORDER BY season_id DESC LIMIT ?",(user_id,limit)); return cursor.fetchall()
+
+init_player_systems()
 
 # Инициализируем магазин после создания базовых таблиц.
 init_shop_db()
@@ -1196,6 +1431,21 @@ def admin_recent_activity(limit=10):
     cursor.execute("""
         SELECT user_id, last_seen, message_count FROM user_activity
         ORDER BY last_seen DESC LIMIT ?
+    """, (limit,))
+    return cursor.fetchall()
+
+def admin_known_group_ids(limit=100):
+    cursor.execute("SELECT DISTINCT chat_id FROM reputation WHERE chat_id < 0 ORDER BY chat_id DESC LIMIT ?", (limit,))
+    return [row[0] for row in cursor.fetchall()]
+
+def admin_user_activity(user_id):
+    cursor.execute("SELECT last_seen, last_chat_id, message_count FROM user_activity WHERE user_id=?", (user_id,))
+    return cursor.fetchone() or (0, 0, 0)
+
+def admin_recent_actions_all(limit=30):
+    cursor.execute("""
+        SELECT chat_id, admin_id, action, target_id, amount, details, created_at
+        FROM admin_action_log ORDER BY id DESC LIMIT ?
     """, (limit,))
     return cursor.fetchall()
 
@@ -1327,3 +1577,46 @@ def add_group_award(chat_id, from_user_id, to_user_id, name, description, rarity
 def get_group_awards(chat_id, user_id, limit=50):
     cursor.execute("SELECT award_id,from_user_id,name,description,rarity,created_at FROM group_awards WHERE chat_id=? AND to_user_id=? ORDER BY created_at DESC LIMIT ?", (chat_id,user_id,limit))
     return cursor.fetchall()
+
+# --- Developer monitoring / backups ---
+def health_check():
+    cursor.execute("SELECT 1")
+    return True
+
+def dev_recent_events(limit=30):
+    """Recent project events assembled from admin actions and lightweight system events."""
+    cursor.execute("""
+        SELECT created_at, 'admin', chat_id, admin_id,
+               action || CASE WHEN target_id IS NOT NULL THEN ' → ' || CAST(target_id AS TEXT) ELSE '' END ||
+               CASE WHEN details != '' THEN ' · ' || details ELSE '' END
+        FROM admin_action_log
+        ORDER BY id DESC LIMIT ?
+    """, (limit,))
+    rows = cursor.fetchall()
+    return sorted(rows, key=lambda x: x[0], reverse=True)[:limit]
+
+def admin_action_rating(limit=20):
+    cursor.execute("""
+        SELECT admin_id, COUNT(*) AS cnt, MAX(created_at) AS last_seen
+        FROM admin_action_log
+        GROUP BY admin_id
+        ORDER BY cnt DESC, last_seen DESC
+        LIMIT ?
+    """, (limit,))
+    return cursor.fetchall()
+
+def create_db_backup():
+    """Create a consistent SQLite backup using SQLite's online backup API."""
+    import shutil
+    base_dir = os.path.dirname(DB_PATH) or "."
+    backup_dir = os.path.join(base_dir, "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(backup_dir, f"bot_{stamp}.db")
+    backup_conn = sqlite3.connect(path)
+    try:
+        conn.backup(backup_conn)
+        backup_conn.commit()
+    finally:
+        backup_conn.close()
+    return path
