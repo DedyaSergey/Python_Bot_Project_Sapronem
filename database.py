@@ -169,6 +169,59 @@ def init_db():
         PRIMARY KEY (season_id, chat_id, user_id)
     )
     """)
+
+    # Глобальный сезон: единый рейтинг игрока сразу по всем группам.
+    # chat_id = 0 в season_rewards/season_achievements используется как
+    # глобальная область, чтобы награда не могла быть получена повторно
+    # в разных чатах.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS global_season_config (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        enabled INTEGER DEFAULT 0,
+        season_name TEXT DEFAULT '',
+        rewards_json TEXT DEFAULT ''
+    )
+    """)
+    cursor.execute("INSERT OR IGNORE INTO global_season_config(id, enabled, season_name, rewards_json) VALUES(1, 0, '', '')")
+    # Миграция старых баз: добавляем настройки глобального сезона.
+    for column, ddl in (("season_name", "TEXT DEFAULT ''"), ("rewards_json", "TEXT DEFAULT ''")):
+        try:
+            cursor.execute(f"ALTER TABLE global_season_config ADD COLUMN {column} {ddl}")
+        except sqlite3.OperationalError:
+            pass
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS global_season_settings (
+        season_id TEXT PRIMARY KEY,
+        season_name TEXT DEFAULT '',
+        rewards_json TEXT DEFAULT ''
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS admin_sapy_weekly (
+        admin_id INTEGER,
+        week_key TEXT,
+        amount INTEGER DEFAULT 0,
+        PRIMARY KEY (admin_id, week_key)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS global_season_points (
+        season_id TEXT,
+        user_id INTEGER,
+        points INTEGER DEFAULT 0,
+        PRIMARY KEY (season_id, user_id)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS season_achievements (
+        season_id TEXT,
+        chat_id INTEGER,
+        user_id INTEGER,
+        place INTEGER,
+        title TEXT,
+        PRIMARY KEY (season_id, chat_id, user_id)
+    )
+    """)
     conn.commit()
 
 # --- ФУНКЦИИ ДЛЯ ЕЖЕДНЕВНЫХ ЗАДАНИЙ, СЕЗОНОВ И СОБЫТИЙ ---
@@ -238,29 +291,119 @@ def claim_daily_quest(chat_id, user_id):
     sapy = add_sapy(user_id,5)
     return True, q, coins, sapy
 
+def is_global_season_enabled():
+    cursor.execute("SELECT enabled FROM global_season_config WHERE id=1")
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+def get_global_season_config():
+    cursor.execute("SELECT season_name, rewards_json FROM global_season_config WHERE id=1")
+    row = cursor.fetchone() or ("", "")
+    return row[0] or "", row[1] or ""
+
+def get_global_season_settings(season_id=None):
+    season_id = season_id or current_season_id()
+    cursor.execute("SELECT season_name, rewards_json FROM global_season_settings WHERE season_id=?", (season_id,))
+    row = cursor.fetchone()
+    if row:
+        return row[0] or "", row[1] or ""
+    return get_global_season_config()
+
+def set_global_season_config(season_name=None, rewards_json=None, season_id=None):
+    current_name, current_rewards = get_global_season_config()
+    name = current_name if season_name is None else season_name.strip()
+    rewards = current_rewards if rewards_json is None else rewards_json
+    cursor.execute("UPDATE global_season_config SET season_name=?, rewards_json=? WHERE id=1", (name, rewards))
+    sid = season_id or current_season_id()
+    cursor.execute("INSERT INTO global_season_settings(season_id,season_name,rewards_json) VALUES(?,?,?) ON CONFLICT(season_id) DO UPDATE SET season_name=excluded.season_name,rewards_json=excluded.rewards_json", (sid, name, rewards))
+    conn.commit()
+    return name, rewards
+
+def set_global_season(enabled):
+    enabled = bool(enabled)
+    if enabled:
+        # Зафиксировать настройки именно для текущей недели перед включением.
+        name, rewards = get_global_season_config()
+        cursor.execute("INSERT INTO global_season_settings(season_id,season_name,rewards_json) VALUES(?,?,?) ON CONFLICT(season_id) DO NOTHING", (current_season_id(), name, rewards))
+    cursor.execute("UPDATE global_season_config SET enabled=? WHERE id=1", (1 if enabled else 0,))
+    conn.commit()
+    return enabled
+
+def toggle_global_season():
+    return set_global_season(not is_global_season_enabled())
+
+def admin_sapy_week_key(ts=None):
+    return time.strftime("%Y-W%W", time.localtime(ts or time.time()))
+
+def admin_sapy_weekly_used(admin_id):
+    cursor.execute("SELECT amount FROM admin_sapy_weekly WHERE admin_id=? AND week_key=?", (admin_id, admin_sapy_week_key()))
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
+
+def admin_sapy_weekly_remaining(admin_id, limit=300):
+    return max(0, int(limit) - admin_sapy_weekly_used(admin_id))
+
+def admin_add_sapy_limited(admin_id, user_id, amount, weekly_limit=300):
+    amount = int(amount)
+    if amount <= 0:
+        return False, admin_sapy_weekly_used(admin_id), get_sapy(user_id)
+    used = admin_sapy_weekly_used(admin_id)
+    if used + amount > weekly_limit:
+        return False, used, get_sapy(user_id)
+    balance = add_sapy(user_id, amount)
+    week = admin_sapy_week_key()
+    cursor.execute("INSERT INTO admin_sapy_weekly(admin_id,week_key,amount) VALUES(?,?,?) ON CONFLICT(admin_id,week_key) DO UPDATE SET amount=amount+excluded.amount", (admin_id, week, amount))
+    conn.commit()
+    return True, used + amount, balance
+
+def season_scope(chat_id):
+    return 0 if is_global_season_enabled() else chat_id
+
 def add_season_points(chat_id, user_id, points):
     season = current_season_id()
+    # Локальный рейтинг сохраняем всегда — это позволяет безопасно вернуть
+    # групповые сезоны после выключения глобального режима.
     cursor.execute("""INSERT INTO season_points(season_id,chat_id,user_id,points) VALUES(?,?,?,?)
     ON CONFLICT(season_id,chat_id,user_id) DO UPDATE SET points=points+excluded.points""", (season,chat_id,user_id,points))
+    if is_global_season_enabled():
+        cursor.execute("""INSERT INTO global_season_points(season_id,user_id,points) VALUES(?,?,?)
+        ON CONFLICT(season_id,user_id) DO UPDATE SET points=points+excluded.points""", (season,user_id,points))
     conn.commit()
     return get_season_points(chat_id,user_id)
 
 def get_season_points(chat_id,user_id,season_id=None):
     season_id = season_id or current_season_id()
-    cursor.execute("SELECT points FROM season_points WHERE season_id=? AND chat_id=? AND user_id=?", (season_id,chat_id,user_id))
+    if is_global_season_enabled():
+        cursor.execute("SELECT points FROM global_season_points WHERE season_id=? AND user_id=?", (season_id,user_id))
+    else:
+        cursor.execute("SELECT points FROM season_points WHERE season_id=? AND chat_id=? AND user_id=?", (season_id,chat_id,user_id))
     row=cursor.fetchone()
     return row[0] if row else 0
 
 def get_season_top(chat_id, season_id=None, limit=10):
     season_id = season_id or current_season_id()
-    cursor.execute("""SELECT user_id, points FROM season_points WHERE season_id=? AND chat_id=? ORDER BY points DESC LIMIT ?""", (season_id,chat_id,limit))
+    if is_global_season_enabled():
+        cursor.execute("""SELECT user_id, points FROM global_season_points WHERE season_id=? ORDER BY points DESC, user_id ASC LIMIT ?""", (season_id,limit))
+    else:
+        cursor.execute("""SELECT user_id, points FROM season_points WHERE season_id=? AND chat_id=? ORDER BY points DESC, user_id ASC LIMIT ?""", (season_id,chat_id,limit))
     return cursor.fetchall()
+
+def _latest_user_name(user_id):
+    cursor.execute("SELECT user_name FROM reputation WHERE user_id=? AND user_name IS NOT NULL AND user_name!='' ORDER BY rowid DESC LIMIT 1", (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else 'Игрок'
 
 def get_season_top_named(chat_id, season_id=None, limit=10):
     """Топ сезона вместе с сохранённым никнеймом/именем.
-    Возвращает (user_id, user_name, points).
+    Возвращает (user_id, user_name, points). В глобальном режиме рейтинг
+    объединяет очки игрока из всех групп.
     """
     season_id = season_id or current_season_id()
+    if is_global_season_enabled():
+        cursor.execute("""SELECT user_id, points FROM global_season_points
+                         WHERE season_id=? ORDER BY points DESC, user_id ASC LIMIT ?""", (season_id,limit))
+        rows = cursor.fetchall()
+        return [(uid, _latest_user_name(uid), points) for uid, points in rows]
     cursor.execute("""
         SELECT s.user_id, COALESCE(NULLIF(r.user_name, ''), 'Игрок'), s.points
         FROM season_points s
@@ -271,40 +414,108 @@ def get_season_top_named(chat_id, season_id=None, limit=10):
     """, (season_id, chat_id, limit))
     return cursor.fetchall()
 
+def get_global_reward_rows(season_id=None):
+    """Возвращает кастомные награды глобального сезона как список (from,to,coins,sapy)."""
+    import json
+    _name, raw = get_global_season_settings(season_id or previous_season_id())
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+        return [tuple(map(int, row)) for row in rows if len(row) == 4]
+    except Exception:
+        return []
+
 def claim_previous_season_rewards(chat_id, user_id):
     season = previous_season_id()
+    scope = season_scope(chat_id)
     top = get_season_top(chat_id, season, 50)
     place = next((i+1 for i,(uid,_) in enumerate(top) if uid == user_id), None)
     if not place:
         return False, None, 0, get_sapy(user_id)
-    cursor.execute("SELECT claimed FROM season_rewards WHERE season_id=? AND chat_id=? AND user_id=?", (season,chat_id,user_id))
+    cursor.execute("SELECT claimed FROM season_rewards WHERE season_id=? AND chat_id=? AND user_id=?", (season,scope,user_id))
     row=cursor.fetchone()
     if row and row[0]:
         return False, place, 0, get_sapy(user_id)
 
-    rewards = {
-        1:(1000,100), 2:(750,75), 3:(500,50),
-        4:(350,35), 5:(350,35),
-        6:(250,25), 7:(250,25), 8:(250,25), 9:(250,25), 10:(250,25),
-        **{i:(175,15) for i in range(11,21)},
-        **{i:(125,10) for i in range(21,31)},
-        **{i:(75,7) for i in range(31,41)},
-        **{i:(50,5) for i in range(41,51)},
-    }
-    coins, sapy = rewards[place]
-    cursor.execute("INSERT OR REPLACE INTO season_rewards(season_id,chat_id,user_id,place,claimed) VALUES(?,?,?,?,1)", (season,chat_id,user_id,place))
+    custom_rows = get_global_reward_rows(season) if is_global_season_enabled() else []
+    if custom_rows:
+        reward = next(((coins, sapy) for start, end, coins, sapy in custom_rows if start <= place <= end), None)
+        if reward is None:
+            return False, place, 0, get_sapy(user_id)
+        coins, sapy = reward
+    else:
+        rewards = {
+            1:(1000,100), 2:(750,75), 3:(500,50),
+            4:(350,35), 5:(350,35),
+            6:(250,25), 7:(250,25), 8:(250,25), 9:(250,25), 10:(250,25),
+            **{i:(175,15) for i in range(11,21)},
+            **{i:(125,10) for i in range(21,31)},
+            **{i:(75,7) for i in range(31,41)},
+            **{i:(50,5) for i in range(41,51)},
+        }
+        coins, sapy = rewards[place]
+    cursor.execute("INSERT OR REPLACE INTO season_rewards(season_id,chat_id,user_id,place,claimed) VALUES(?,?,?,?,1)", (season,scope,user_id,place))
 
     # Памятное достижение для топ-3. Не заменяет обычный купленный титул.
     season_title = None
     season_titles = {
-        1: "👑 Властелин сезона", 2: "🥈 Серебряная звезда", 3: "🥉 Бронзовый герой",
-        4: "🔥 Четвёртый в строю", 5: "⚡ Пятёрка сезона", 6: "💎 Алмазный игрок",
-        7: "🐉 Дракон рейтинга", 8: "🦅 Орёл сезона", 9: "🌟 Девятая звезда", 10: "🏹 Охотник за топом"
+        1: "👑 Император сезона",
+        2: "🦅 Властелин высоты",
+        3: "🐉 Золотой дракон",
+        4: "⚡ Громовержец",
+        5: "🔥 Пламя сезона",
+        6: "💎 Алмазный игрок",
+        7: "🌌 Хранитель звёзд",
+        8: "🐺 Серый волк",
+        9: "🦊 Хитрый лис",
+        10: "🏹 Охотник за топом",
+        11: "🛡️ Страж рейтинга",
+        12: "🌪️ Ураган активности",
+        13: "🧭 Покоритель вершин",
+        14: "🪐 Звёздный странник",
+        15: "🗡️ Дуэлянт сезона",
+        16: "🏰 Лорд арены",
+        17: "🪽 Вестник победы",
+        18: "🧿 Хранитель удачи",
+        19: "🏅 Мастер сезона",
+        20: "🎯 Меткий претендент",
+        21: "⭐ Элита сезона",
+        22: "🔥 Вершитель рейтинга",
+        23: "💠 Сапфировый игрок",
+        24: "🌙 Ночной чемпион",
+        25: "☄️ Комета сезона",
+        26: "🎖️ Почётный претендент",
+        27: "🦊 Серебряный охотник",
+        28: "🐲 Дракон арены",
+        29: "⚔️ Воин рейтинга",
+        30: "🏆 Тридцатка лучших",
+        31: "🌟 Яркий игрок",
+        32: "🚀 Ракета сезона",
+        33: "🧨 Динамит активности",
+        34: "🧊 Ледяной стратег",
+        35: "🌋 Вулкан чата",
+        36: "🎲 Игрок удачи",
+        37: "🕶️ Тёмная лошадка",
+        38: "🔮 Провидец рейтинга",
+        39: "🦾 Железный игрок",
+        40: "🎮 Ветеран сезона",
+        41: "🏹 Охотник за очками",
+        42: "💫 Звёздный боец",
+        43: "🪄 Маг активности",
+        44: "🌊 Волна сезона",
+        45: "🗿 Столп чата",
+        46: "🎯 Меткий участник",
+        47: "🛡️ Надёжный боец",
+        48: "✨ Искра сезона",
+        49: "🏃 Быстрый претендент",
+        50: "🎖️ Финалист сезона",
     }
     if place in season_titles:
         season_title = f"{season_titles[place]} #{season.split('-W')[-1]}"
     if season_title:
-        cursor.execute("INSERT OR REPLACE INTO season_achievements(season_id,chat_id,user_id,place,title) VALUES(?,?,?,?,?)", (season,chat_id,user_id,place,season_title))
+        cursor.execute("INSERT OR REPLACE INTO season_achievements(season_id,chat_id,user_id,place,title) VALUES(?,?,?,?,?)", (season,scope,user_id,place,season_title))
+        grant_title(user_id, season_title, equip=False)
 
     conn.commit()
     coins_total=add_coins(chat_id,user_id,coins)

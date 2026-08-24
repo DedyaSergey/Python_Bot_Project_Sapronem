@@ -3,6 +3,7 @@ import time
 import random
 import logging
 import html
+import json
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
@@ -66,20 +67,44 @@ ADMIN_IDS = load_admin_ids()
 def is_owner(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
+def load_dev_ids():
+    raw = os.getenv("DEV_IDS", "")
+    result = set()
+    for value in raw.replace(";", ",").split(","):
+        value = value.strip()
+        if value.isdigit():
+            result.add(int(value))
+    return result
+
+DEV_IDS = load_dev_ids()
+
+def is_developer(user_id: int) -> bool:
+    return user_id in DEV_IDS
+
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
          InlineKeyboardButton(text="📈 Аналитика", callback_data="admin_analytics")],
         [InlineKeyboardButton(text="👤 Пользователь", callback_data="admin_user")],
-        [InlineKeyboardButton(text="💎 Выдать сапы", callback_data="admin_add_sapy"),
-         InlineKeyboardButton(text="➖ Забрать сапы", callback_data="admin_remove_sapy")],
-        [InlineKeyboardButton(text="👑 Выдать VIP", callback_data="admin_add_vip"),
-         InlineKeyboardButton(text="❌ Снять VIP", callback_data="admin_remove_vip")],
+        [InlineKeyboardButton(text="💎 Выдать сапы · лимит 300/нед", callback_data="admin_add_sapy")],
         [InlineKeyboardButton(text="🏷️ Выдать титул", callback_data="admin_add_title"),
          InlineKeyboardButton(text="✏️ Сменить ник", callback_data="admin_nickname")],
-        [InlineKeyboardButton(text="💳 Платежи", callback_data="admin_payments"),
-         InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔄 Обновить ID админов", callback_data="admin_reload")],
+    ])
+
+def dev_menu():
+    status = "ВКЛ" if database.is_global_season_enabled() else "ВЫКЛ"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Глобальный сезон", callback_data="dev_global")],
+        [InlineKeyboardButton(text=f"🌐 Сезон: {status}", callback_data="dev_global_toggle")],
+        [InlineKeyboardButton(text="✏️ Название сезона", callback_data="dev_global_name"),
+         InlineKeyboardButton(text="🎁 Награды сезона", callback_data="dev_global_rewards")],
+        [InlineKeyboardButton(text="⚡ Безлимитные сапы", callback_data="dev_add_sapy"),
+         InlineKeyboardButton(text="➖ Забрать сапы", callback_data="dev_remove_sapy")],
+        [InlineKeyboardButton(text="👑 Выдать VIP", callback_data="dev_add_vip"),
+         InlineKeyboardButton(text="❌ Снять VIP", callback_data="dev_remove_vip")],
+        [InlineKeyboardButton(text="💳 Платежи", callback_data="dev_payments"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="dev_broadcast")],
     ])
 
 class AdminForm(StatesGroup):
@@ -91,6 +116,11 @@ class AdminForm(StatesGroup):
     TITLE_ACTION = State()
     NICKNAME_ACTION = State()
     BROADCAST = State()
+
+class DevForm(StatesGroup):
+    GLOBAL_NAME = State()
+    GLOBAL_REWARDS = State()
+    SAPY_ACTION = State()
 
 # Покупка сапов за Telegram Stars. Цены указаны в Stars (XTR).
 STAR_PACKAGES = {
@@ -144,7 +174,22 @@ async def admin_command(message: types.Message, state: FSMContext):
         await message.answer("❌ Доступ запрещён.")
         return
     await state.clear()
-    await message.answer("🔐 <b>Панель владельца Sapronem</b>\n\nВыбери действие:", reply_markup=admin_menu())
+    await message.answer("🔐 <b>Панель администратора Sapronem</b>\n\nВыбери действие:", reply_markup=admin_menu())
+
+@dp.message(Command("dev"), F.chat.type == "private")
+async def dev_command(message: types.Message, state: FSMContext):
+    if not is_developer(message.from_user.id):
+        await message.answer("❌ Нет доступа.")
+        return
+    await state.clear()
+    name, _ = database.get_global_season_config()
+    await message.answer(
+        "🧬 <b>Developer Panel Sapronem</b>\n\n"
+        f"🌐 Глобальный сезон: <b>{'ВКЛ' if database.is_global_season_enabled() else 'ВЫКЛ'}</b>\n"
+        f"🏷️ Название: <b>{html.escape(name or 'не задано')}</b>\n\n"
+        "⚠️ Здесь находятся функции, которые не должны попадать обычным администраторам.",
+        reply_markup=dev_menu()
+    )
 
 @dp.callback_query(F.data == "admin_reload")
 async def admin_reload(callback: types.CallbackQuery):
@@ -154,6 +199,108 @@ async def admin_reload(callback: types.CallbackQuery):
         await callback.answer("❌ Нет доступа.", show_alert=True)
         return
     await callback.answer("✅ Список админов обновлён.", show_alert=True)
+
+@dp.callback_query(F.data.startswith("dev_"))
+async def dev_callbacks(callback: types.CallbackQuery, state: FSMContext):
+    if not is_developer(callback.from_user.id):
+        await callback.answer("❌ Нет доступа.", show_alert=True)
+        return
+    action = callback.data
+    await callback.answer()
+    if action == "dev_global":
+        name, rewards = database.get_global_season_config()
+        await callback.message.answer(
+            "🌐 <b>Настройка глобального сезона</b>\n\n"
+            f"🏷️ Название: <b>{html.escape(name or 'не задано')}</b>\n"
+            f"🎁 Награды: <b>{'настроены' if rewards else 'по умолчанию'}</b>\n\n"
+            "Название и награды доступны только разработчику.\n"
+            "Награды вводятся диапазонами мест.", reply_markup=dev_menu())
+    elif action == "dev_global_toggle":
+        enabled = database.toggle_global_season()
+        await callback.message.answer(
+            ("🌐 <b>Глобальный сезон включён.</b>\n\n"
+             f"🏷️ {html.escape(database.get_global_season_config()[0] or 'Глобальный сезон')}\n"
+             "Теперь очки суммируются из всех групп.") if enabled else
+            "🏠 <b>Глобальный сезон выключен.</b>\nРейтинг снова отдельный по группам.", reply_markup=dev_menu())
+    elif action == "dev_global_name":
+        await state.set_state(DevForm.GLOBAL_NAME)
+        await callback.message.answer("✏️ Введи публичное название глобального сезона.\nНапример: <code>Битва легенд</code>\nДля стандартного названия: <code>-</code>")
+    elif action == "dev_global_rewards":
+        await state.set_state(DevForm.GLOBAL_REWARDS)
+        await callback.message.answer(
+            "🎁 <b>Награды глобального сезона</b>\n\n"
+            "Формат: <code>место=монеты/сапы</code> или <code>от-до=монеты/сапы</code>.\n\n"
+            "Пример:\n<code>1=2000/200\n2=1500/150\n3=1000/100\n4-5=700/70\n6-10=500/50\n11-20=300/30\n21-50=150/15</code>\n\n"
+            "Чтобы вернуть стандартные награды: <code>-</code>")
+    elif action == "dev_add_sapy":
+        await state.set_state(DevForm.SAPY_ACTION); await state.update_data(sapy_sign=1)
+        await callback.message.answer("⚡ <b>Безлимитная выдача сапов</b>\nВведи: <code>ID количество</code>")
+    elif action == "dev_remove_sapy":
+        await state.set_state(DevForm.SAPY_ACTION); await state.update_data(sapy_sign=-1)
+        await callback.message.answer("➖ Введи: <code>ID количество</code>")
+    elif action == "dev_add_vip":
+        await state.set_state(AdminForm.VIP_USER); await state.update_data(vip_action="add")
+        await callback.message.answer("👑 Введи ID пользователя и количество дней: <code>ID дни</code>")
+    elif action == "dev_remove_vip":
+        await state.set_state(AdminForm.VIP_USER); await state.update_data(vip_action="remove")
+        await callback.message.answer("❌ Введи Telegram ID пользователя:")
+    elif action == "dev_payments":
+        rows = database.admin_payment_history()
+        if not rows:
+            await callback.message.answer("💳 Платежей пока нет.")
+        else:
+            lines=["💳 <b>Последние платежи</b>",""]
+            for uid, stars, sapy, payload, created in rows:
+                dt=time.strftime("%d.%m.%Y %H:%M", time.localtime(created))
+                lines.append(f"👤 <code>{uid}</code> — ⭐ {stars} → 💎 {sapy} — {dt}")
+            await callback.message.answer("\n".join(lines))
+    elif action == "dev_broadcast":
+        await state.set_state(AdminForm.BROADCAST)
+        await callback.message.answer("📢 Отправь текст рассылки. Для отмены: <code>отмена</code>")
+@dp.message(DevForm.GLOBAL_NAME, F.chat.type == "private")
+async def dev_global_name_action(message: types.Message, state: FSMContext):
+    if not is_developer(message.from_user.id): await state.clear(); return
+    value=(message.text or "").strip(); name="" if value=="-" else value[:64]
+    database.set_global_season_config(season_name=name)
+    await state.clear(); await message.answer(f"✅ Название сохранено: <b>{html.escape(name or 'Глобальный сезон')}</b>", reply_markup=dev_menu())
+
+@dp.message(DevForm.GLOBAL_REWARDS, F.chat.type == "private")
+async def dev_global_rewards_action(message: types.Message, state: FSMContext):
+    if not is_developer(message.from_user.id): await state.clear(); return
+    raw=(message.text or "").strip()
+    if raw=="-":
+        database.set_global_season_config(rewards_json=""); await state.clear()
+        await message.answer("✅ Кастомные награды сброшены. Используются стандартные.", reply_markup=dev_menu()); return
+    rows=[]
+    try:
+        for line in raw.splitlines():
+            line=line.strip()
+            if not line: continue
+            left,right=line.split("=",1); coins_s,sapy_s=right.strip().split("/",1)
+            if "-" in left:
+                a,b=left.strip().split("-",1); start,end=int(a),int(b)
+            else: start=end=int(left.strip())
+            coins,sapy=int(coins_s),int(sapy_s)
+            if start<1 or end<start or end>100 or coins<0 or sapy<0: raise ValueError
+            rows.append([start,end,coins,sapy])
+        rows.sort(key=lambda x:x[0])
+        if not rows or rows[0][0]!=1 or rows[-1][1]<50: raise ValueError
+        for a,b in zip(rows,rows[1:]):
+            if b[0]<=a[1]: raise ValueError
+    except Exception:
+        await message.answer("❌ Формат неверный. Пример: <code>1=2000/200</code> или <code>4-5=700/70</code>."); return
+    database.set_global_season_config(rewards_json=json.dumps(rows, ensure_ascii=False))
+    await state.clear(); await message.answer("✅ Награды глобального сезона сохранены.", reply_markup=dev_menu())
+
+@dp.message(DevForm.SAPY_ACTION, F.chat.type == "private")
+async def dev_sapy_action(message: types.Message, state: FSMContext):
+    if not is_developer(message.from_user.id): await state.clear(); return
+    parts=(message.text or "").split()
+    if len(parts)!=2 or not all(x.isdigit() for x in parts): await message.answer("❌ Формат: <code>ID количество</code>"); return
+    uid,amount=map(int,parts); data=await state.get_data(); amount*=data.get("sapy_sign",1)
+    balance=database.admin_add_sapy(uid,amount); await state.clear()
+    await message.answer(f"⚡ Баланс <code>{uid}</code> изменён на <b>{amount:+d} 💎</b>.\nТеперь: <b>{balance} 💎</b>", reply_markup=dev_menu())
+
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
@@ -204,13 +351,15 @@ async def admin_callbacks(callback: types.CallbackQuery, state: FSMContext):
             f"👑 Активных VIP: <b>{s['vip']}</b>\n"
             f"⭐ Stars получено: <b>{s['stars']}</b>"
         )
+    elif action in ("admin_global_season", "admin_add_vip", "admin_remove_vip", "admin_payments", "admin_broadcast", "admin_remove_sapy"):
+        await callback.message.answer("🔒 Эта функция доступна только в <code>/dev</code>.")
     elif action == "admin_user":
         await state.set_state(AdminForm.USER_ID)
         await callback.message.answer("👤 Введи Telegram ID пользователя:")
     elif action in ("admin_add_sapy", "admin_remove_sapy"):
         await state.update_data(sapy_sign=1 if action == "admin_add_sapy" else -1)
         await state.set_state(AdminForm.SAPY_ACTION)
-        await callback.message.answer("💎 Введи через пробел: <code>ID пользователя количество</code>\nНапример: <code>123456789 500</code>")
+        await callback.message.answer("💎 Выдача сапов: максимум <b>300 💎 в неделю с одного админа</b>.\nВведи: <code>ID пользователя количество</code>\nНапример: <code>123456789 50</code>")
     elif action == "admin_add_vip":
         await state.set_state(AdminForm.VIP_USER)
         await state.update_data(vip_action="add")
@@ -274,11 +423,19 @@ async def admin_sapy_action(message: types.Message, state: FSMContext):
         await message.answer("❌ Формат: <code>ID количество</code>")
         return
     uid, amount = map(int, parts)
-    data = await state.get_data()
-    amount *= data.get("sapy_sign", 1)
-    balance = database.admin_add_sapy(uid, amount)
+    if amount <= 0:
+        await message.answer("❌ Количество должно быть больше 0.")
+        return
+    remaining = database.admin_sapy_weekly_remaining(message.from_user.id)
+    if amount > remaining:
+        await message.answer(f"❌ Осталось выдать только <b>{remaining} 💎</b> на этой неделе. Лимит: <b>300 💎/нед.</b>")
+        return
+    ok, used, balance = database.admin_add_sapy_limited(message.from_user.id, uid, amount)
+    if not ok:
+        await message.answer("❌ Недельный лимит превышен.")
+        return
     await state.clear()
-    await message.answer(f"✅ Баланс <code>{uid}</code> изменён на <b>{amount:+d} 💎</b>.\nТеперь: <b>{balance} 💎</b>")
+    await message.answer(f"✅ Пользователю <code>{uid}</code> выдано <b>+{amount} 💎</b>.\n📊 Использовано: <b>{used}/300</b> за неделю.\nБаланс: <b>{balance} 💎</b>")
 
 @dp.message(AdminForm.VIP_USER, F.chat.type == "private")
 async def admin_vip_action(message: types.Message, state: FSMContext):
@@ -714,10 +871,15 @@ def build_season_text(chat_id, user_id):
         season_number = season
 
     top_rows = database.get_season_top_named(chat_id, season, 10)
+    global_mode = database.is_global_season_enabled()
+    global_name, _ = database.get_global_season_settings(season) if global_mode else ("", "")
+    season_header = (f"🌐 <b>{html.escape(global_name)}</b>" if global_mode and global_name else
+                     (f"🌐 <b>Глобальный сезон #{season_number}</b>" if global_mode else f"👑 <b>Сезон #{season_number}</b>"))
     lines = [
-        f"👑 <b>Сезон #{season_number}</b>",
+        season_header,
         "",
-        "📈 Очки сезона получаются за активность в группе.",
+        ("📈 Очки сезона суммируются из активности во всех группах Sapronem." if global_mode
+         else "📈 Очки сезона получаются за активность в группе."),
         "",
     ]
 
@@ -739,22 +901,24 @@ def build_season_text(chat_id, user_id):
     if claimed:
         lines.extend(["", f"🎉 Ты занял <b>{place}</b>-е место в прошлом сезоне и получил награду!"])
 
-    lines.extend([
-        "",
-        f"🎯 <b>Твои очки:</b> {my_points}",
-        "",
-        "🎁 <b>Награды топ-50 прошлого сезона</b>",
-        "",
-        "🥇 <b>1 место</b> — 1000 🪙 + 100 💎",
-        "🥈 <b>2 место</b> — 750 🪙 + 75 💎",
-        "🥉 <b>3 место</b> — 500 🪙 + 50 💎",
-        "🏅 <b>4–5 места</b> — 350 🪙 + 35 💎",
-        "🏅 <b>6–10 места</b> — 250 🪙 + 25 💎",
-        "🎖 <b>11–20 места</b> — 175 🪙 + 15 💎",
-        "🎖 <b>21–30 места</b> — 125 🪙 + 10 💎",
-        "🎖 <b>31–40 места</b> — 75 🪙 + 7 💎",
-        "🎖 <b>41–50 места</b> — 50 🪙 + 5 💎",
-    ])
+    lines.extend(["", f"🎯 <b>Твои очки:</b> {my_points}", "", "🎁 <b>Награды топ-50 прошлого сезона</b>", ""])
+    previous_custom = database.get_global_reward_rows(database.previous_season_id()) if global_mode else []
+    if previous_custom:
+        for start, end, coins, sapy in previous_custom:
+            place_text = f"{start} место" if start == end else f"{start}–{end} места"
+            lines.append(f"🏅 <b>{place_text}</b> — {coins} 🪙 + {sapy} 💎")
+    else:
+        lines.extend([
+            "🥇 <b>1 место</b> — 1000 🪙 + 100 💎",
+            "🥈 <b>2 место</b> — 750 🪙 + 75 💎",
+            "🥉 <b>3 место</b> — 500 🪙 + 50 💎",
+            "🏅 <b>4–5 места</b> — 350 🪙 + 35 💎",
+            "🏅 <b>6–10 места</b> — 250 🪙 + 25 💎",
+            "🎖 <b>11–20 места</b> — 175 🪙 + 15 💎",
+            "🎖 <b>21–30 места</b> — 125 🪙 + 10 💎",
+            "🎖 <b>31–40 места</b> — 75 🪙 + 7 💎",
+            "🎖 <b>41–50 места</b> — 50 🪙 + 5 💎",
+        ])
     return "\n".join(lines)
 
 async def send_daily_bonus(message: types.Message, user: types.User):
