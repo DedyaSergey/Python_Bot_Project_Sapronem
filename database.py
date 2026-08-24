@@ -679,6 +679,9 @@ def log_message(chat_id, user_id, user_name):
         messages_all = messages_all + 1,
         user_name = ?
     """, (chat_id, user_id, user_name, user_name))
+    day=time.strftime("%Y-%m-%d", time.localtime())
+    cursor.execute("""INSERT INTO message_daily_stats(chat_id,user_id,day_key,messages) VALUES(?,?,?,1)
+        ON CONFLICT(chat_id,user_id,day_key) DO UPDATE SET messages=messages+1""",(chat_id,user_id,day))
     conn.commit()
 
 def get_karma(chat_id, user_id):
@@ -1314,6 +1317,7 @@ def like_player(chat_id, from_user_id, to_user_id):
     if cursor.fetchone():
         return False,get_like_count(chat_id,to_user_id)
     cursor.execute("INSERT INTO player_likes(chat_id,from_user_id,to_user_id,created_at) VALUES(?,?,?,?)",(chat_id,from_user_id,to_user_id,int(time.time())))
+    add_notification(to_user_id, "❤️ Кто-то поставил тебе лайк в группе.")
     conn.commit(); return True,get_like_count(chat_id,to_user_id)
 
 def get_like_count(chat_id,to_user_id):
@@ -1328,6 +1332,7 @@ def gift_inventory_item(from_user_id,to_user_id,item_id):
     cursor.execute("UPDATE user_inventory SET quantity=quantity-1 WHERE user_id=? AND item_id=? AND quantity>0",(from_user_id,item_id))
     cursor.execute("INSERT INTO user_inventory(user_id,item_id,quantity) VALUES(?,?,1) ON CONFLICT(user_id,item_id) DO UPDATE SET quantity=quantity+1",(to_user_id,item_id))
     cursor.execute("INSERT INTO player_gifts(from_user_id,to_user_id,item_id,quantity,created_at) VALUES(?,?,?,?,?)",(from_user_id,to_user_id,item_id,1,int(time.time())))
+    add_notification(to_user_id, f"🎁 Тебе подарили: {item[1]}")
     conn.commit(); return True,item[1]
 
 def get_gift_history(user_id,limit=10):
@@ -1519,6 +1524,9 @@ ACHIEVEMENT_DEFS = [
     ("season_100", "🏆 Претендент", "100 очков сезона", 2),
     ("profile", "👤 В игре", "Создать профиль", 1),
     ("vip", "👑 Премиум", "Получить VIP", 3),
+("secret_collector", "🕵️ Тихий коллекционер", "Секретное достижение", 4),
+("secret_social", "🤫 Свой круг", "Секретное достижение", 3),
+("secret_games", "🎭 За кулисами", "Секретное достижение", 4),
 ]
 
 def list_achievement_defs():
@@ -1537,7 +1545,10 @@ def grant_achievement(user_id, achievement_id):
     if not row or has_achievement(user_id, achievement_id):
         return False, row
     _, title, desc, rarity = row
-    cursor.execute("INSERT INTO achievements(user_id,achievement_id,title,description,rarity,awarded_at) VALUES(?,?,?,?,?,?)", (user_id,achievement_id,title,desc,rarity,int(time.time())))
+    secret = 1 if achievement_id.startswith("secret_") else 0
+    cursor.execute("INSERT INTO achievements(user_id,achievement_id,title,description,rarity,awarded_at,secret) VALUES(?,?,?,?,?,?,?)", (user_id,achievement_id,title,desc,rarity,int(time.time()),secret))
+    if secret:
+        add_notification(user_id, f"🕵️ Секретное достижение открыто: {title}")
     conn.commit()
     return True, row
 
@@ -1563,6 +1574,12 @@ def evaluate_achievements(user_id, chat_id=0):
     if get_sapy(user_id) >= 5000: checks.append("sapy_5000")
     if get_profile(user_id): checks.append("profile")
     if vip_seconds_left(user_id) > 0: checks.append("vip")
+    cursor.execute("SELECT COUNT(*) FROM user_inventory WHERE user_id=? AND quantity>0",(user_id,)); inv_count=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM player_likes WHERE to_user_id=?",(user_id,)); likes=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM player_gifts WHERE from_user_id=?",(user_id,)); gifts=cursor.fetchone()[0]
+    if inv_count >= 5: checks.append("secret_collector")
+    if likes >= 5 and gifts >= 3: checks.append("secret_social")
+    if get_level_progress(user_id)[0] >= 10 and len(get_mastery(user_id)) >= 3: checks.append("secret_games")
     newly=[]
     for aid in checks:
         ok,row=grant_achievement(user_id,aid)
@@ -1620,3 +1637,238 @@ def create_db_backup():
     finally:
         backup_conn.close()
     return path
+
+
+# --- 1.19: quests, records, collection sets, developer alerts ---
+def add_notification(user_id, text):
+    cursor.execute("INSERT INTO notifications(user_id,text,created_at,read) VALUES(?,?,?,0)",(user_id,text,int(time.time())))
+    conn.commit()
+
+def get_notifications(user_id, limit=20, unread_only=False):
+    q="SELECT id,text,created_at,read FROM notifications WHERE user_id=?"
+    if unread_only: q += " AND read=0"
+    q += " ORDER BY id DESC LIMIT ?"
+    cursor.execute(q,(user_id,limit)); return cursor.fetchall()
+
+def mark_notifications_read(user_id):
+    cursor.execute("UPDATE notifications SET read=1 WHERE user_id=? AND read=0",(user_id,)); conn.commit()
+
+def get_unread_notification_count(user_id):
+    cursor.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND read=0",(user_id,)); return cursor.fetchone()[0]
+
+def get_period_messages(chat_id, user_id, days):
+    since=time.strftime("%Y-%m-%d", time.localtime(time.time()-days*86400))
+    cursor.execute("SELECT COALESCE(SUM(messages),0) FROM message_daily_stats WHERE chat_id=? AND user_id=? AND day_key>=?",(chat_id,user_id,since)); return cursor.fetchone()[0]
+
+def group_period_stats(chat_id, days):
+    since=time.strftime("%Y-%m-%d", time.localtime(time.time()-days*86400))
+    cursor.execute("SELECT COALESCE(SUM(messages),0), COUNT(DISTINCT user_id) FROM message_daily_stats WHERE chat_id=? AND day_key>=?",(chat_id,since))
+    msgs,users=cursor.fetchone(); return int(msgs or 0),int(users or 0)
+
+def add_dev_change(developer_id, action, details=''):
+    cursor.execute("INSERT INTO developer_change_log(developer_id,action,details,created_at) VALUES(?,?,?,?)",(developer_id,action,details,int(time.time()))); conn.commit()
+
+def get_dev_changes(limit=30, developer_id=None, query=None):
+    q="SELECT developer_id,action,details,created_at FROM developer_change_log WHERE 1=1"; args=[]
+    if developer_id is not None: q+=" AND developer_id=?"; args.append(developer_id)
+    if query: q+=" AND (action LIKE ? OR details LIKE ?)"; args += [f"%{query}%",f"%{query}%"]
+    q += " ORDER BY id DESC LIMIT ?"; args.append(limit)
+    cursor.execute(q,args); return cursor.fetchall()
+
+def get_group_templates(chat_id):
+    cursor.execute("SELECT name,text FROM group_announcement_templates WHERE chat_id=? ORDER BY name",(chat_id,)); return cursor.fetchall()
+
+def save_group_template(chat_id,name,text):
+    cursor.execute("INSERT INTO group_announcement_templates(chat_id,name,text,created_at) VALUES(?,?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET text=excluded.text,created_at=excluded.created_at",(chat_id,name,text,int(time.time()))); conn.commit()
+
+def delete_group_template(chat_id,name):
+    cursor.execute("DELETE FROM group_announcement_templates WHERE chat_id=? AND name=?",(chat_id,name)); conn.commit()
+
+def init_v19_systems():
+    cursor.execute("""CREATE TABLE IF NOT EXISTS quest_path (
+        user_id INTEGER PRIMARY KEY, step INTEGER DEFAULT 1, claimed INTEGER DEFAULT 0, started_at INTEGER NOT NULL
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS developer_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, chat_id INTEGER DEFAULT 0, user_id INTEGER DEFAULT 0,
+        details TEXT, created_at INTEGER NOT NULL, resolved INTEGER DEFAULT 0
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS collection_set_claims (
+        user_id INTEGER, set_id TEXT, claimed_at INTEGER NOT NULL, PRIMARY KEY(user_id,set_id)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, read INTEGER DEFAULT 0
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS message_daily_stats (
+        chat_id INTEGER, user_id INTEGER, day_key TEXT, messages INTEGER DEFAULT 0,
+        PRIMARY KEY(chat_id,user_id,day_key)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS group_announcement_templates (
+        chat_id INTEGER, name TEXT, text TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY(chat_id,name)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS developer_change_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, developer_id INTEGER, action TEXT NOT NULL, details TEXT DEFAULT '', created_at INTEGER NOT NULL
+    )""")
+    try:
+        cursor.execute("ALTER TABLE achievements ADD COLUMN secret INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+
+COLLECTION_SETS = [
+    ("starter", "🌟 Первое впечатление", ["title_star", "badge_star", "frame_neon"], "🏷️ Титул «Коллекционер I»"),
+    ("fire", "🔥 Огненный набор", ["badge_flame", "effect_spark", "frame_gold"], "🏷️ Титул «Пламя коллекции»"),
+]
+
+def get_quest_path(user_id):
+    cursor.execute("SELECT step,claimed,started_at FROM quest_path WHERE user_id=?", (user_id,))
+    row=cursor.fetchone()
+    if not row:
+        cursor.execute("INSERT INTO quest_path(user_id,step,claimed,started_at) VALUES(?,?,?,?)", (user_id,1,0,int(time.time()))); conn.commit(); return (1,0)
+    return row[0],row[1]
+
+def get_quest_path_status(user_id):
+    step,claimed=get_quest_path(user_id)
+    checks=[bool(get_profile(user_id)), get_level_progress(user_id)[0] >= 2, get_collection_stats(user_id)[1] >= 3, len(get_mastery(user_id)) >= 2, get_level_progress(user_id)[0] >= 5]
+    titles=["👤 Создай профиль", "⭐ Достигни 2 уровня", "🏅 Получи 3 достижения", "🏅 Открой 2 навыка", "🚀 Достигни 5 уровня"]
+    done=sum(1 for x in checks if x)
+    current=min(step,5)
+    if current<=done: current=min(done+1,5)
+    if done>=5: current=5
+    return current, done, checks, titles, claimed
+
+def claim_quest_path(user_id):
+    current,done,checks,titles,claimed=get_quest_path_status(user_id)
+    if claimed: return False,"Путь уже завершён.",0
+    if done < 5: return False,f"Путь ещё не завершён: {done}/5.",0
+    cursor.execute("UPDATE quest_path SET step=5,claimed=1 WHERE user_id=?",(user_id,)); conn.commit()
+    add_sapy(user_id,100); add_player_xp(user_id,100)
+    return True,"🎁 +100 💎 и +100 XP",100
+
+def get_personal_records(user_id, chat_id=0):
+    msgs=get_user_messages(chat_id,user_id) if chat_id else 0
+    dice=get_user_dice_score(chat_id,user_id) if chat_id else 0
+    season=get_season_points(chat_id,user_id) if chat_id else 0
+    lvl,_,_,xp=get_level_progress(user_id)
+    cursor.execute("SELECT COUNT(*) FROM player_gifts WHERE from_user_id=?",(user_id,)); gifts=cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM player_likes WHERE to_user_id=?",(user_id,)); likes=cursor.fetchone()[0]
+    return {"messages":msgs,"dice":dice,"season":season,"level":lvl,"xp":xp,"gifts":gifts,"likes":likes}
+
+def collection_sets_status(user_id):
+    out=[]
+    for sid,name,items,reward in COLLECTION_SETS:
+        owned=sum(1 for item in items if get_inventory_quantity(user_id,item)>0)
+        out.append((sid,name,owned,len(items),reward,owned==len(items)))
+    return out
+
+def claim_collection_set(user_id,set_id):
+    for sid,name,items,reward in COLLECTION_SETS:
+        if sid!=set_id: continue
+        if all(get_inventory_quantity(user_id,x)>0 for x in items):
+            cursor.execute("SELECT 1 FROM collection_set_claims WHERE user_id=? AND set_id=?",(user_id,sid))
+            if cursor.fetchone(): return False,"Награда за набор уже получена."
+            cursor.execute("INSERT INTO collection_set_claims(user_id,set_id,claimed_at) VALUES(?,?,?)",(user_id,sid,int(time.time())))
+            grant_title(user_id,reward,equip=False)
+            conn.commit()
+            return True,reward
+        return False,"Набор ещё не собран полностью."
+    return False,"Набор не найден."
+
+def add_dev_alert(kind,chat_id=0,user_id=0,details=""):
+    cursor.execute("INSERT INTO developer_alerts(kind,chat_id,user_id,details,created_at) VALUES(?,?,?,?,?)",(kind,chat_id,user_id,details,int(time.time()))); conn.commit()
+
+def get_dev_alerts(limit=25, unresolved_only=False):
+    q="SELECT id,kind,chat_id,user_id,details,created_at,resolved FROM developer_alerts"
+    if unresolved_only: q += " WHERE resolved=0"
+    q += " ORDER BY id DESC LIMIT ?"
+    cursor.execute(q,(limit,)); return cursor.fetchall()
+
+def resolve_dev_alert(alert_id):
+    cursor.execute("UPDATE developer_alerts SET resolved=1 WHERE id=?",(alert_id,)); conn.commit()
+
+init_v19_systems()
+
+# --- 1.22: ветки, репутация, кланы, feature flags, версии групп, путь игрока ---
+def init_v22_systems():
+    cursor.execute("""CREATE TABLE IF NOT EXISTS player_paths (user_id INTEGER PRIMARY KEY, branch TEXT DEFAULT 'balanced', progress INTEGER DEFAULT 0)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS reputation_global (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS clans (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, owner_id INTEGER, created_at INTEGER NOT NULL)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS clan_members (clan_id INTEGER, user_id INTEGER PRIMARY KEY, role TEXT DEFAULT 'member', joined_at INTEGER NOT NULL)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS feature_flags (key TEXT PRIMARY KEY, enabled INTEGER DEFAULT 1, rollout INTEGER DEFAULT 100, updated_at INTEGER NOT NULL)""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS group_versions (chat_id INTEGER PRIMARY KEY, version TEXT DEFAULT '1.22', updated_at INTEGER NOT NULL)""")
+    conn.commit()
+
+def get_player_path(user_id):
+    cursor.execute("SELECT branch,progress FROM player_paths WHERE user_id=?",(user_id,))
+    row=cursor.fetchone()
+    if not row:
+        cursor.execute("INSERT INTO player_paths(user_id,branch,progress) VALUES(?,?,0)",(user_id,'balanced')); conn.commit(); return 'balanced',0
+    return row
+
+def set_player_path(user_id, branch):
+    if branch not in ('farmer','champion','collector','gamer','balanced'): return False
+    cursor.execute("INSERT INTO player_paths(user_id,branch,progress) VALUES(?,?,0) ON CONFLICT(user_id) DO UPDATE SET branch=excluded.branch",(user_id,branch)); conn.commit(); return True
+
+def add_reputation(user_id, amount):
+    cursor.execute("INSERT INTO reputation_global(user_id,points) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET points=points+excluded.points",(user_id,int(amount))); conn.commit(); return get_reputation(user_id)
+
+def get_reputation(user_id):
+    cursor.execute("SELECT points FROM reputation_global WHERE user_id=?",(user_id,)); row=cursor.fetchone(); return int(row[0]) if row else 0
+
+def clan_create(owner_id,name):
+    name=name.strip()[:32]
+    if not name: return False,'Название пустое.'
+    cursor.execute("SELECT 1 FROM clan_members WHERE user_id=?",(owner_id,))
+    if cursor.fetchone(): return False,'Ты уже состоишь в клане.'
+    try:
+        cursor.execute("INSERT INTO clans(name,owner_id,created_at) VALUES(?,?,?)",(name,owner_id,int(time.time()))); cid=cursor.lastrowid
+        cursor.execute("INSERT INTO clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,?,?)",(cid,owner_id,'owner',int(time.time()))); conn.commit(); return True,cid
+    except sqlite3.IntegrityError: return False,'Такой клан уже существует.'
+
+def clan_join(user_id,name):
+    cursor.execute("SELECT 1 FROM clan_members WHERE user_id=?",(user_id,))
+    if cursor.fetchone(): return False,'Сначала выйди из текущего клана.'
+    cursor.execute("SELECT id FROM clans WHERE lower(name)=lower(?)",(name.strip(),)); row=cursor.fetchone()
+    if not row: return False,'Клан не найден.'
+    cursor.execute("INSERT INTO clan_members(clan_id,user_id,role,joined_at) VALUES(?,?,?,?)",(row[0],user_id,'member',int(time.time()))); conn.commit(); return True,row[0]
+
+def clan_info(user_id):
+    cursor.execute("SELECT c.id,c.name,c.owner_id,cm.role,(SELECT COUNT(*) FROM clan_members x WHERE x.clan_id=c.id) FROM clan_members cm JOIN clans c ON c.id=cm.clan_id WHERE cm.user_id=?",(user_id,)); return cursor.fetchone()
+
+def clan_list(limit=10):
+    cursor.execute("SELECT c.name,c.owner_id,COUNT(cm.user_id) FROM clans c LEFT JOIN clan_members cm ON cm.clan_id=c.id GROUP BY c.id ORDER BY COUNT(cm.user_id) DESC,c.id ASC LIMIT ?",(limit,)); return cursor.fetchall()
+
+def set_feature_flag(key,enabled=None,rollout=None):
+    cursor.execute("SELECT enabled,rollout FROM feature_flags WHERE key=?",(key,)); row=cursor.fetchone()
+    e=int(enabled if enabled is not None else (row[0] if row else 1)); r=int(rollout if rollout is not None else (row[1] if row else 100))
+    cursor.execute("INSERT INTO feature_flags(key,enabled,rollout,updated_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET enabled=excluded.enabled,rollout=excluded.rollout,updated_at=excluded.updated_at",(key,e,max(0,min(100,r)),int(time.time()))); conn.commit()
+
+def get_feature_flags():
+    cursor.execute("SELECT key,enabled,rollout,updated_at FROM feature_flags ORDER BY key"); return cursor.fetchall()
+
+def set_group_version(chat_id,version='1.22'):
+    cursor.execute("INSERT INTO group_versions(chat_id,version,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET version=excluded.version,updated_at=excluded.updated_at",(chat_id,version,int(time.time()))); conn.commit()
+
+def cleanup_preview():
+    out={}
+    for table,col in [('user_activity','last_seen'),('notifications','created_at'),('player_gifts','created_at')]:
+        cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE {col} < ?",(int(time.time())-180*86400,)); out[table]=cursor.fetchone()[0]
+    return out
+
+def cleanup_old_data(days=180):
+    cutoff=int(time.time())-days*86400
+    for table,col in [('user_activity','last_seen'),('notifications','created_at'),('player_gifts','created_at')]:
+        cursor.execute(f"DELETE FROM {table} WHERE {col} < ?",(cutoff,))
+    conn.commit()
+
+init_v22_systems()
+
+
+# Feature rollout: deterministic A/B bucket by subject ID, so the same group/user always gets the same variant.
+def feature_enabled(key, subject_id=0):
+    cursor.execute("SELECT enabled,rollout FROM feature_flags WHERE key=?",(key,)); row=cursor.fetchone()
+    if not row: return True
+    enabled,rollout=row
+    if not enabled: return False
+    bucket=(abs(hash(f'{key}:{subject_id}')) % 100)+1
+    return bucket <= int(rollout)
